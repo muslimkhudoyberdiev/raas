@@ -119,7 +119,7 @@ def get_worker_details_spark():
 def process_single_worker(worker, start_date, today, report_endpoint, access_token):
     """
     Helper function to process a single worker's entire date range.
-    Returns a list of all time off entries for this worker.
+    Returns a list of flattened time off entries for this worker.
     """
     colleague_id = worker.get("colleagueId")
     if not colleague_id:
@@ -136,8 +136,41 @@ def process_single_worker(worker, start_date, today, report_endpoint, access_tok
             report_endpoint, access_token, colleague_id, date_str
         )
         
+        # Flatten the nested structure
+        # Input has "Time_Off_Completed_Details_group" array inside each entry
         if entries:
-            worker_entries.extend(entries)
+            for entry in entries:
+                # Extract top-level fields
+                worker_name = entry.get("Worker")
+                sick_bal = entry.get("sickBal")
+                vac_bal = entry.get("vacBal")
+                
+                # Iterate through the nested group
+                details_group = entry.get("Time_Off_Completed_Details_group", [])
+                
+                if not details_group:
+                    # If the group is empty but entry exists, we might want to capture top-level info?
+                    # But usually we want the details. Skipping for now if no details.
+                    continue
+                    
+                for detail in details_group:
+                    # Create a flattened record
+                    flattened_record = {
+                        "Colleague_ID": colleague_id,
+                        "Worker": worker_name,
+                        "sickBal": sick_bal,
+                        "vacBal": vac_bal,
+                        # Detail fields
+                        "Total_Units": detail.get("Total_Units"),
+                        "createdMoment": detail.get("createdMoment"),
+                        "date": detail.get("date"),
+                        "timeOffEntryRefD": detail.get("timeOffEntryRefD"),
+                        "timeOffEntryWid": detail.get("timeOffEntryWid"),
+                        "timeOffType": detail.get("timeOffType"),
+                        "unitOfTime": detail.get("unitOfTime"),
+                        "units": detail.get("units")
+                    }
+                    worker_entries.append(flattened_record)
         
         current_date += timedelta(days=1)
         
@@ -168,13 +201,11 @@ def ingest_time_off_history(
     today = datetime.now().date()
     
     # 3. Threading Implementation
-    # Adjust max_workers based on your environment's capacity and API rate limits
     MAX_WORKERS = 10 
     
     print(f"Starting threaded processing with {MAX_WORKERS} threads for {len(workers)} workers...")
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Create a future for each worker
         future_to_worker = {
             executor.submit(
                 process_single_worker, 
@@ -200,7 +231,6 @@ def ingest_time_off_history(
                 if data:
                     all_time_off_data.extend(data)
                 
-                # Optional: Progress logging every 10 workers
                 if completed_count % 10 == 0:
                     print(f"Progress: {completed_count}/{total_workers} workers processed.")
                     
