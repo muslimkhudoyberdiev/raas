@@ -93,23 +93,24 @@ def fetch_time_off_report_data(base_endpoint: str, access_token: str, colleague_
 
 def get_worker_details_spark():
     """
-    Query the Lakehouse using Spark SQL to get distinct colleagueId and hireDate.
+    Query the Lakehouse using Spark SQL to get distinct colleagueId.
     """
     try:
+        # Modified query to only get colleagueId as requested
         query = """
-            SELECT distinct colleagueId, hireDate 
+            SELECT distinct colleagueId 
             FROM US_IT_HRIS_LH_L0_LakeHouse.workday_batch_worker_details
             WHERE colleagueId IS NOT NULL
         """
         print("Executing Spark SQL query to get worker details...")
         df = spark.sql(query)
-        # Collect results to a list of dictionaries [Row(colleagueId='...', hireDate='...'), ...]
+        # Collect results to a list of dictionaries [Row(colleagueId='...'), ...]
         workers = [row.asDict() for row in df.collect()]
         print(f"Found {len(workers)} workers to process.")
         return workers
     except NameError:
         print("Spark session not available locally. Returning mock data.")
-        return [{"colleagueId": "50454", "hireDate": "2026-01-01"}]
+        return [{"colleagueId": "50454"}] # Only colleagueId needed now
     except Exception as e:
         print(f"Error executing Spark query: {e}")
         return []
@@ -134,6 +135,9 @@ def ingest_time_off_history(
     workers = get_worker_details_spark()
     
     all_time_off_data = []
+    
+    # FIXED: Start date hardcoded to 2026-01-01
+    start_date = datetime(2026, 1, 1).date()
     today = datetime.now().date()
     
     count = 0
@@ -141,23 +145,16 @@ def ingest_time_off_history(
 
     for worker in workers:
         colleague_id = worker.get("colleagueId")
-        hire_date_str = worker.get("hireDate")
         
         count += 1
-        if not colleague_id or not hire_date_str:
+        if not colleague_id:
             continue
 
-        try:
-            # Handle potential date formats. Adjust format string if source differs (e.g. 'MM/DD/YYYY')
-            # Assuming 'YYYY-MM-DD' or ISO format
-            current_date = datetime.strptime(str(hire_date_str)[:10], "%Y-%m-%d").date()
-        except ValueError:
-            print(f"Invalid hire date format for {colleague_id}: {hire_date_str}")
-            # Fallback to a default start date if needed, or skip
-            continue
+        print(f"[{count}/{total_workers}] Processing {colleague_id} from {start_date} to {today}")
 
-        print(f"[{count}/{total_workers}] Processing {colleague_id} from {current_date} to {today}")
-
+        # Reset current_date for each worker
+        current_date = start_date
+        
         while current_date <= today:
             date_str = current_date.strftime("%Y-%m-%d")
             
@@ -222,7 +219,7 @@ def write_workday_raw_snapshot_json(
         archive_filename = f"{report_name}.json"
         archive_path = f"{specific_archive_dir}/{archive_filename}"
         
-        # Clean up old parquet if exists (legacy)
+        # Clean up old parquet if exists
         old_parquet_path = f"{base_archive_dir}/{report_name}.parquet"
         if mssparkutils.fs.exists(old_parquet_path):
             mssparkutils.fs.rm(old_parquet_path, True)
