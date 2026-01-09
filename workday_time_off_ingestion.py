@@ -4,6 +4,8 @@ import json
 import time
 import random
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 # from pyspark.sql.functions import lit # Assuming this runs in a Spark environment
 # from pyspark.sql import SparkSession # Assuming this runs in a Spark environment
 
@@ -96,7 +98,6 @@ def get_worker_details_spark():
     Query the Lakehouse using Spark SQL to get distinct colleagueId.
     """
     try:
-        # Modified query to only get colleagueId as requested
         query = """
             SELECT distinct colleagueId 
             FROM US_IT_HRIS_LH_L0_LakeHouse.workday_batch_worker_details
@@ -110,10 +111,37 @@ def get_worker_details_spark():
         return workers
     except NameError:
         print("Spark session not available locally. Returning mock data.")
-        return [{"colleagueId": "50454"}] # Only colleagueId needed now
+        return [{"colleagueId": "50454"}, {"colleagueId": "61783"}] 
     except Exception as e:
         print(f"Error executing Spark query: {e}")
         return []
+
+def process_single_worker(worker, start_date, today, report_endpoint, access_token):
+    """
+    Helper function to process a single worker's entire date range.
+    Returns a list of all time off entries for this worker.
+    """
+    colleague_id = worker.get("colleagueId")
+    if not colleague_id:
+        return []
+
+    worker_entries = []
+    current_date = start_date
+    
+    # Iterate through days for this worker
+    while current_date <= today:
+        date_str = current_date.strftime("%Y-%m-%d")
+        
+        entries = fetch_time_off_report_data(
+            report_endpoint, access_token, colleague_id, date_str
+        )
+        
+        if entries:
+            worker_entries.extend(entries)
+        
+        current_date += timedelta(days=1)
+        
+    return worker_entries
 
 def ingest_time_off_history(
     client_id: str, 
@@ -136,39 +164,50 @@ def ingest_time_off_history(
     
     all_time_off_data = []
     
-    # FIXED: Start date hardcoded to 2026-01-01
     start_date = datetime(2026, 1, 1).date()
     today = datetime.now().date()
     
-    count = 0
-    total_workers = len(workers)
-
-    for worker in workers:
-        colleague_id = worker.get("colleagueId")
+    # 3. Threading Implementation
+    # Adjust max_workers based on your environment's capacity and API rate limits
+    MAX_WORKERS = 10 
+    
+    print(f"Starting threaded processing with {MAX_WORKERS} threads for {len(workers)} workers...")
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Create a future for each worker
+        future_to_worker = {
+            executor.submit(
+                process_single_worker, 
+                worker, 
+                start_date, 
+                today, 
+                report_endpoint, 
+                access_token
+            ): worker 
+            for worker in workers
+        }
         
-        count += 1
-        if not colleague_id:
-            continue
-
-        print(f"[{count}/{total_workers}] Processing {colleague_id} from {start_date} to {today}")
-
-        # Reset current_date for each worker
-        current_date = start_date
+        completed_count = 0
+        total_workers = len(workers)
         
-        while current_date <= today:
-            date_str = current_date.strftime("%Y-%m-%d")
+        for future in as_completed(future_to_worker):
+            completed_count += 1
+            worker = future_to_worker[future]
+            colleague_id = worker.get("colleagueId")
             
-            entries = fetch_time_off_report_data(
-                report_endpoint, access_token, colleague_id, date_str
-            )
-            
-            if entries:
-                all_time_off_data.extend(entries)
-            
-            current_date += timedelta(days=1)
-            # time.sleep(0.05) # Rate limit protection
+            try:
+                data = future.result()
+                if data:
+                    all_time_off_data.extend(data)
+                
+                # Optional: Progress logging every 10 workers
+                if completed_count % 10 == 0:
+                    print(f"Progress: {completed_count}/{total_workers} workers processed.")
+                    
+            except Exception as exc:
+                print(f"Worker {colleague_id} generated an exception: {exc}")
 
-    # 3. Write ALL results to Lakehouse (Single File)
+    # 4. Write ALL results to Lakehouse (Single File)
     if all_time_off_data:
         write_workday_raw_snapshot_json(
             report_data=all_time_off_data,
