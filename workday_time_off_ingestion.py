@@ -119,7 +119,7 @@ def get_worker_details_spark():
 def process_single_worker(worker, start_date, today, report_endpoint, access_token):
     """
     Helper function to process a single worker's entire date range.
-    Returns a list of flattened time off entries for this worker.
+    Returns a list of raw time off entries for this worker.
     """
     colleague_id = worker.get("colleagueId")
     if not colleague_id:
@@ -136,41 +136,9 @@ def process_single_worker(worker, start_date, today, report_endpoint, access_tok
             report_endpoint, access_token, colleague_id, date_str
         )
         
-        # Flatten the nested structure
-        # Input has "Time_Off_Completed_Details_group" array inside each entry
         if entries:
-            for entry in entries:
-                # Extract top-level fields
-                worker_name = entry.get("Worker")
-                sick_bal = entry.get("sickBal")
-                vac_bal = entry.get("vacBal")
-                
-                # Iterate through the nested group
-                details_group = entry.get("Time_Off_Completed_Details_group", [])
-                
-                if not details_group:
-                    # If the group is empty but entry exists, we might want to capture top-level info?
-                    # But usually we want the details. Skipping for now if no details.
-                    continue
-                    
-                for detail in details_group:
-                    # Create a flattened record
-                    flattened_record = {
-                        "Colleague_ID": colleague_id,
-                        "Worker": worker_name,
-                        "sickBal": sick_bal,
-                        "vacBal": vac_bal,
-                        # Detail fields
-                        "Total_Units": detail.get("Total_Units"),
-                        "createdMoment": detail.get("createdMoment"),
-                        "date": detail.get("date"),
-                        "timeOffEntryRefD": detail.get("timeOffEntryRefD"),
-                        "timeOffEntryWid": detail.get("timeOffEntryWid"),
-                        "timeOffType": detail.get("timeOffType"),
-                        "unitOfTime": detail.get("unitOfTime"),
-                        "units": detail.get("units")
-                    }
-                    worker_entries.append(flattened_record)
+            # Append raw entries directly without flattening
+            worker_entries.extend(entries)
         
         current_date += timedelta(days=1)
         
