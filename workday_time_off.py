@@ -234,13 +234,33 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
          entries = [{"timeOffType": {"descriptor": "Vacation"}, "timeOffEntryWid": "mock_wid", "units": "8"}]
 
     for entry in entries:
-        logger.info(f"DEBUG RAW ENTRY: {json.dumps(entry, indent=2)}")
+        logger.info(f"DEBUG RAW ENTRY keys: {list(entry.keys())}")
+        logger.info(f"DEBUG RAW ENTRY content: {json.dumps(entry, indent=2)}")
+        
+        # Robust extraction attempt
+        # Try to find Time Off Type
+        type_obj = entry.get("timeOffType") or entry.get("Time_Off_Type") or entry.get("TimeOffType")
+        type_desc = ""
+        if isinstance(type_obj, dict):
+             type_desc = type_obj.get("descriptor", "") or type_obj.get("@Descriptor", "")
+        elif isinstance(type_obj, str):
+             type_desc = type_obj
+        
+        # If still empty, check if it's a flat key like "Time_Off_Type_descriptor"
+        if not type_desc:
+             type_desc = entry.get("timeOffType_descriptor") or entry.get("Time_Off_Type_descriptor") or ""
+
         # Check for Vacation
-        type_desc = str(entry.get("timeOffType", {}).get("descriptor", "") or entry.get("timeOffType", ""))
-        logger.info(f"Checking Entry Type: '{type_desc}' (WID: {entry.get('timeOffEntryWid') or entry.get('id')})")
+        logger.info(f"Checking Entry Type: '{type_desc}'")
         
         if "Vacation" in type_desc:
-            wid = entry.get("timeOffEntryWid") or entry.get("id")
+            # Try to find WID
+            wid = entry.get("timeOffEntryWid") or entry.get("Time_Off_Entry_WID") or entry.get("id") or entry.get("WID")
+            if isinstance(wid, dict): # Sometimes WID is an object?
+                 wid = wid.get("id") or wid.get("#text")
+            
+            logger.info(f"Vacation Match! WID found: {wid}")
+
             if wid:
                 # 2. Prepare Payload
                 qty = calculate_hours_logic(entry.get("units"), sql_hrs)
