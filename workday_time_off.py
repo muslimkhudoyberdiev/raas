@@ -263,8 +263,15 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
 def write_logs_to_table(logs_data, table_name="workday_time_off_logs"):
     if not logs_data:
         return
+    
+    # Helper to serialize datetime objects in logs
+    def json_serial(obj):
+        if isinstance(obj, (datetime, datetime.date)):
+            return obj.isoformat()
+        raise TypeError (f"Type {type(obj)} not serializable")
+
     try:
-        rdd = spark.sparkContext.parallelize([json.dumps(r) for r in logs_data])
+        rdd = spark.sparkContext.parallelize([json.dumps(r, default=json_serial) for r in logs_data])
         df_logs = spark.read.json(rdd)
         df_logs.write.mode("append").saveAsTable(table_name)
         logger.info(f"Written {len(logs_data)} logs to {table_name}")
