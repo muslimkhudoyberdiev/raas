@@ -151,7 +151,8 @@ def ingest_time_off_history(
     token_endpoint: str,
     report_endpoint: str,
     raw_current_path: str,
-    raw_archive_path: str
+    raw_archive_path: str,
+    max_workers: int = 100
 ):
     print("=== Workday Time Off History Ingestion Started ===")
 
@@ -169,11 +170,11 @@ def ingest_time_off_history(
     today = datetime.now().date()
     
     # 3. Threading Implementation
-    MAX_WORKERS = 100
+    # MAX_WORKERS is now parametrized
     
-    print(f"Starting threaded processing with {MAX_WORKERS} threads for {len(workers)} workers...")
+    print(f"Starting threaded processing with {max_workers} threads for {len(workers)} workers...")
     
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_worker = {
             executor.submit(
                 process_single_worker, 
@@ -297,5 +298,6 @@ if __name__ == "__main__":
         TOKEN_ENDPOINT, 
         TIMEOFF_REPORT_ENDPOINT,
         RAW_CURRENT_PATH,
-        RAW_ARCHIVE_PATH
+        RAW_ARCHIVE_PATH,
+        max_workers=100
     )
