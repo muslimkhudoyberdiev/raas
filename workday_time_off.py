@@ -69,6 +69,7 @@ def get_worker_details_spark():
           AND HP.`POSITION` IN ('Associate', 'Counsel')
           AND HO.OFFC_CODE IN ('AUS1','CHI1','DAL1','DEN1','HOU1','LAX1','IPS1','NYC1','PIT1','SAT1','SFO1','STL1','WAS1')
           AND lower(HP.`POSITION`) NOT LIKE '%partner%'
+        LIMIT 1
         """
         logger.info("Executing Spark SQL query...")
         df = spark.sql(query)
@@ -177,8 +178,14 @@ def execute_post_request(url: str, payload: dict, access_token: str, dry_run: bo
     }
 
     try:
+        logger.info(f"--- POST Request to {url} ---")
+        logger.info(f"Payload: {json.dumps(payload, indent=2)}")
+        
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
         
+        logger.info(f"--- Response ({response.status_code}) ---")
+        logger.info(f"Body: {response.text}")
+
         result = {
             "timestamp": timestamp,
             "http_status": response.status_code,
@@ -315,6 +322,6 @@ if __name__ == "__main__":
     
     ingest_time_off_process(
         CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN, TOKEN_ENDPOINT, TIMEOFF_REPORT_ENDPOINT,
-        max_workers=100,
-        dry_run=True 
+        max_workers=1,
+        dry_run=False 
     )
