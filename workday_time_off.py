@@ -68,14 +68,11 @@ def fetch_time_off_report_data(base_endpoint: str, access_token: str, colleague_
     try:
         url = base_endpoint 
         
-        # Format dates as needed by Workday: YYYY-MM-DD-08:00 based on example
-        # Assuming input dates are YYYY-MM-DD string or datetime objects
-        
         # Helper to ensure string format
         def fmt_date(d):
             if isinstance(d, (datetime,)):
                 return d.strftime("%Y-%m-%d")
-            return str(d).split('T')[0] # simplistic cleanup if needed
+            return str(d).split('T')[0] 
 
         prompt_date_str = fmt_date(prompt_date)
         work_date_str = fmt_date(work_date)
@@ -112,28 +109,13 @@ def fetch_time_off_report_data(base_endpoint: str, access_token: str, colleague_
         logger.error(f"ERROR while fetching Time Off report for {colleague_id}: {e}")
         return []
 
-def post_time_off_update(access_token: str, worker_id: str, time_off_entry_wid: str, date_val: str, quantity: str):
+def post_time_off_update(access_token: str, worker_id: str, time_off_entry_wid: str, date_val: str, quantity: str, dry_run: bool = False):
     """
-    Sends a POST request to the Absence Management API.
+    Sends a POST request to the Absence Management API and returns the parsed result.
+    If dry_run is True, returns a mock success response.
     """
-    # Note: URL has a worker ID in the path. 
-    # The user example: .../workers/f503c098b21d10010654c7866af00003/requestTimeOff
-    # I need to use the actual worker's ID (Workday WID) if available, or the Colleague ID if that works in the URL.
-    # The prompt says: "WorkdayId -> Colleague_ID". 
-    # Usually the API requires the Workday WID (32 char hex) in the URL path.
-    # The SQL query returns `EMPLOYEE_CODE` as `WorkdayId`. This is usually the Employee ID (e.g., 12345), not the WID.
-    # However, the user example URL has a WID: f503...
-    # Without the WID in the SQL query, I might fail if the API demands WID.
-    # I will assume `worker_id` passed here is what goes into the URL. 
-    # If the SQL `WorkdayId` is just the EmployeeID, this URL construction might be wrong unless the API accepts EmployeeID in a different format.
-    # BUT, I must follow the user's mapping: "WorkdayId -> Colleague_ID" (for the GET report).
-    # For the POST, the user says: "send that results into the different api".
-    # I will assume for now I should use the `worker_id` (WorkdayId from SQL) in the URL.
-    
     url = f"https://wd3-impl-services1.workday.com/ccx/api/absenceManagement/v3/nrf3/workers/{worker_id}/requestTimeOff"
 
-    # Format date for payload: "2026-01-06T08:00:00.000Z"
-    # Input date_val is likely YYYY-MM-DD
     if "T" not in str(date_val):
         formatted_date = f"{date_val}T08:00:00.000Z"
     else:
@@ -157,35 +139,75 @@ def post_time_off_update(access_token: str, worker_id: str, time_off_entry_wid: 
     
     headers = {
         'Content-Type': 'application/json',
-        'Authorization': f'Bearer {access_token}',
-        # 'Cookie': ... # Cookies usually not needed with Bearer token, removing hardcoded cookie
+        'Authorization': f'Bearer {access_token}'
     }
+
+    timestamp = datetime.utcnow().isoformat()
+
+    if dry_run:
+        logger.info(f"[DRY RUN] Posting time off for {worker_id} on {date_val} with Qty {quantity}")
+        return {
+            "status": "DRY_RUN",
+            "worker_id": worker_id,
+            "date": date_val,
+            "timestamp": timestamp,
+            "payload": payload_dict
+        }
 
     try:
         response = requests.post(url, headers=headers, data=payload, timeout=30)
+        
+        log_entry = {
+            "worker_id": worker_id,
+            "request_date": date_val,
+            "request_timestamp": timestamp,
+            "http_status": response.status_code,
+            "response_text": response.text,
+            "success": False
+        }
+
         if response.status_code in (200, 201):
-            logger.info(f"Successfully posted time off for {worker_id} on {date_val}. Response: {response.text}")
+            try:
+                resp_json = response.json()
+                # Parse specific fields
+                days_list = resp_json.get("days", [])
+                day_entry = days_list[0] if days_list else {}
+                
+                log_entry.update({
+                    "success": True,
+                    "id": day_entry.get("id"),
+                    "descriptor": day_entry.get("descriptor"),
+                    "comment": day_entry.get("comment"),
+                    "timeOffType_id": day_entry.get("timeOffType", {}).get("id"),
+                    "timeOffType_descriptor": day_entry.get("timeOffType", {}).get("descriptor"),
+                    "date": day_entry.get("date"),
+                    "dailyQuantity": day_entry.get("dailyQuantity"),
+                    "transactionStatus": resp_json.get("businessProcessParameters", {}).get("transactionStatus", {}).get("descriptor")
+                })
+                logger.info(f"Successfully posted for {worker_id}. Transaction: {log_entry.get('transactionStatus')}")
+                
+            except Exception as parse_err:
+                logger.error(f"Error parsing response for {worker_id}: {parse_err}")
+                log_entry["parse_error"] = str(parse_err)
         else:
-            logger.error(f"Failed to post time off for {worker_id}: {response.status_code} - {response.text}")
+            logger.error(f"Failed to post for {worker_id}: {response.status_code} - {response.text}")
             
+        return log_entry
+
     except Exception as e:
-        logger.error(f"ERROR while posting time off for {worker_id}: {e}")
+        logger.error(f"ERROR while posting for {worker_id}: {e}")
+        return {
+            "worker_id": worker_id,
+            "request_date": date_val,
+            "request_timestamp": timestamp,
+            "success": False,
+            "error": str(e)
+        }
 
 def calculate_hours_logic(units, sql_hrs):
-    """
-    Placeholder for 'calculate hours logic'.
-    User said: "look at the timeOffType value if this 'Vacation' we need calculate hours logic"
-    User also provided SQL `hrs`.
-    I will assume we want to use the SQL hours as the source of truth to update/request.
-    """
-    # If units is needed for calculation, it is available here.
-    # For now returning sql_hrs as string.
     return str(sql_hrs)
 
 def get_worker_details_spark():
-    """
-    Query the Lakehouse using Spark SQL to get the target data.
-    """
     try:
         query = """
         SELECT
@@ -237,12 +259,11 @@ def get_worker_details_spark():
         return rows
     except NameError:
         logger.warning("Spark session not available locally. Returning mock data.")
-        # Mock data based on query structure
         return [
             {
                 "WorkdayId": "50454", 
                 "Timecard_post_date": "2026-01-01", 
-                "timecard_worked_date": "2026-01-05",
+                "timecard_worked_date": "2026-01-06",
                 "hrs": 8.0
             }
         ] 
@@ -250,74 +271,89 @@ def get_worker_details_spark():
         logger.error(f"Error executing Spark query: {e}")
         return []
 
-def process_single_row(row, report_endpoint, access_token):
+def process_single_row(row, report_endpoint, access_token, dry_run):
     """
-    Process a single row from the SQL query.
+    Process a single row, calling GET then POST, returning logs.
     """
-    # Extract mapped fields
-    workday_id = row.get("WorkdayId") # -> Colleague_ID
-    prompt_date = row.get("Timecard_post_date") # -> promptDate1
-    worked_date = row.get("timecard_worked_date") # -> date
+    logs = []
+    
+    workday_id = row.get("WorkdayId")
+    prompt_date = row.get("Timecard_post_date")
+    worked_date = row.get("timecard_worked_date")
     sql_hrs = row.get("hrs")
 
     if not all([workday_id, prompt_date, worked_date]):
-        logger.warning(f"Skipping row due to missing data: {row}")
-        return
+        return logs
 
-    # 1. Fetch Report Data
+    # 1. Fetch
     entries = fetch_time_off_report_data(
         report_endpoint, access_token, workday_id, prompt_date, worked_date
     )
     
-    # 2. Process Entries
+    if not entries and dry_run:
+        # For mock testing, simulate finding an entry
+        entries = [{
+            "timeOffType": {"descriptor": "Vacation Time Off", "id": "vac123"},
+            "timeOffEntryWid": "entry123",
+            "units": "8"
+        }]
+
+    # 2. Process
     for entry in entries:
-        # Check timeOffType
-        # The structure of 'entry' depends on the Workday report JSON. 
-        # Typically: {"timeOffType": {"descriptor": "Vacation", "id": "..."}} or similar.
-        # User said: "look at the timeOffType value if this 'Vacation'"
-        # And "timeOffEntryWid" is likely a field in the entry.
-        
-        # Adjust key access based on actual API response structure (assumed flat or nested)
-        # Assuming 'timeOffType' is a dict or string in the entry.
-        
         time_off_type_obj = entry.get("timeOffType", {})
-        # If it's a dict, get descriptor or id. If string, compare directly.
         time_off_type_val = ""
         if isinstance(time_off_type_obj, dict):
             time_off_type_val = time_off_type_obj.get("descriptor", "")
-            # Or maybe checking the 'id' if we knew the ID for Vacation.
         else:
             time_off_type_val = str(time_off_type_obj)
-            
-        # Also check simple key if flattened
+        
         if not time_off_type_val and "timeOffType" in entry:
              time_off_type_val = str(entry["timeOffType"])
 
-        # Check for Vacation
-        if "Vacation" in time_off_type_val: # Loose match as per "Vacation Time Off"
+        if "Vacation" in time_off_type_val:
+            wid = entry.get("timeOffEntryWid") or entry.get("WID") or entry.get("id")
             
-            # Get timeOffEntryWid
-            # User said "id is equal to timeOffEntryWid".
-            # In report entry, WID is often in "id" or "WID" or "timeOffEntryWid"
-            wid = entry.get("timeOffEntryWid")
-            if not wid:
-                 wid = entry.get("WID") # Fallback
-            if not wid:
-                 # Check if the 'id' field in the entry is the wid
-                 wid = entry.get("id")
+            if wid:
+                units = entry.get("units")
+                qty = calculate_hours_logic(units, sql_hrs)
+                
+                # 3. Post
+                result = post_time_off_update(access_token, workday_id, wid, worked_date, qty, dry_run)
+                logs.append(result)
+    
+    return logs
 
-            if not wid:
-                logger.warning(f"Could not find timeOffEntryWid for Vacation entry: {entry}")
-                continue
+def write_logs_to_table(logs_data, table_name="workday_time_off_logs"):
+    """
+    Writes the collected logs to a Delta table.
+    """
+    if not logs_data:
+        logger.info("No logs to write.")
+        return
 
-            units = entry.get("units") # User mentioned 'units'
-
-            # Calculate Quantity
-            qty = calculate_hours_logic(units, sql_hrs)
-            
-            # Post Update
-            post_time_off_update(access_token, workday_id, wid, worked_date, qty)
-
+    from pyspark.sql.types import StructType, StructField, StringType, BooleanType, DoubleType
+    import json
+    
+    # Flatten/normalize data for DataFrame
+    # Note: Some fields might be missing in some rows, so we should ensure schema consistency
+    # We'll dump the whole thing to JSON then let Spark infer or define schema
+    
+    try:
+        rdd = spark.sparkContext.parallelize([json.dumps(r) for r in logs_data])
+        df_logs = spark.read.json(rdd)
+        
+        logger.info(f"Writing {len(logs_data)} log entries to table {table_name}...")
+        
+        # Save to table (append mode)
+        # Using saveAsTable or insertInto depending on environment
+        # Here assuming managed table
+        df_logs.write.mode("append").saveAsTable(table_name)
+        logger.info("Logs successfully written.")
+        
+    except NameError:
+        logger.warning("Spark session not found. Skipping log table write.")
+    except Exception as e:
+        logger.error(f"Error writing logs: {e}")
 
 def ingest_time_off_process(
     client_id: str, 
@@ -325,20 +361,20 @@ def ingest_time_off_process(
     refresh_token: str, 
     token_endpoint: str,
     report_endpoint: str,
-    max_workers: int = 100
+    max_workers: int = 100,
+    dry_run: bool = False
 ):
-    logger.info("=== Workday Time Off Processing Started ===")
+    logger.info(f"=== Workday Time Off Processing Started (Dry Run: {dry_run}) ===")
 
-    # 1. Get Token
     access_token = refresh_workday_access_token(
         client_id, client_secret, refresh_token, token_endpoint
     )
 
-    # 2. Get Data from Spark
     rows = get_worker_details_spark()
     
-    # 3. Threaded Processing
-    logger.info(f"Starting threaded processing with {max_workers} threads for {len(rows)} records...")
+    all_logs = []
+    
+    logger.info(f"Starting threaded processing with {max_workers} threads...")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_row = {
@@ -346,7 +382,8 @@ def ingest_time_off_process(
                 process_single_row, 
                 row, 
                 report_endpoint, 
-                access_token
+                access_token,
+                dry_run
             ): row 
             for row in rows
         }
@@ -357,16 +394,19 @@ def ingest_time_off_process(
 
         for future in as_completed(future_to_row):
             completed_count += 1
-            row = future_to_row[future]
-            
             try:
-                future.result() # Output handled in process_single_row
+                logs = future.result()
+                if logs:
+                    all_logs.extend(logs)
                 
                 if completed_count % log_interval == 0 or completed_count == total_rows:
                     logger.info(f"Progress: {completed_count}/{total_rows} records processed.")
                     
             except Exception as exc:
-                logger.error(f"Row processing generated an exception: {exc}")
+                logger.error(f"Row processing exception: {exc}")
+
+    # Write logs
+    write_logs_to_table(all_logs)
 
     logger.info("=== Workday Time Off Processing Finished ===")
 
@@ -377,11 +417,13 @@ if __name__ == "__main__":
     TOKEN_ENDPOINT = "https://wd3-impl-services1.workday.com/ccx/oauth2/nrf3/token"
     TIMEOFF_REPORT_ENDPOINT = "https://wd3-impl-services1.workday.com/ccx/service/customreport2/nrf3/INT0137_USA_HCM_Datahub_Absence_ISU/CRI_INT0137_USA_Datahub_Timeoffs"
     
+    # Set dry_run=True for "test first part ingestion"
     ingest_time_off_process(
         CLIENT_ID, 
         CLIENT_SECRET, 
         REFRESH_TOKEN, 
         TOKEN_ENDPOINT, 
         TIMEOFF_REPORT_ENDPOINT,
-        max_workers=100
+        max_workers=100,
+        dry_run=True 
     )
