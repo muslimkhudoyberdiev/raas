@@ -220,10 +220,14 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
     sql_hrs = row.get("hrs")
 
     if not all([workday_id, prompt_date, worked_date]):
+        logger.warning(f"Skipping row missing data: {row}")
         return logs
+
+    logger.info(f"Processing Worker: {workday_id}, Date: {worked_date}, Prompt: {prompt_date}")
 
     # 1. Fetch Existing Entries
     entries = fetch_time_off_report_data(report_endpoint, access_token, workday_id, prompt_date, worked_date)
+    logger.info(f"Fetched {len(entries)} entries for {workday_id}")
     
     if not entries and dry_run:
          # Mock entry for testing
@@ -232,6 +236,7 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
     for entry in entries:
         # Check for Vacation
         type_desc = str(entry.get("timeOffType", {}).get("descriptor", "") or entry.get("timeOffType", ""))
+        logger.info(f"Checking Entry Type: '{type_desc}' (WID: {entry.get('timeOffEntryWid') or entry.get('id')})")
         
         if "Vacation" in type_desc:
             wid = entry.get("timeOffEntryWid") or entry.get("id")
