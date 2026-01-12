@@ -14,114 +14,109 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Placeholder for Spark session and mssparkutils if running locally
+# Placeholder for Spark
 try:
     spark
 except NameError:
     spark = None
 
-try:
-    mssparkutils
-except NameError:
-    class MockMsSparkUtils:
-        class FS:
-            def exists(self, path): return False
-            def rm(self, path, recursive): pass
-            def mkdirs(self, path): pass
-            def put(self, path, content, overwrite): pass
-        fs = FS()
-    mssparkutils = MockMsSparkUtils()
-
+# --- AUTHENTICATION ---
 def refresh_workday_access_token(client_id: str, client_secret: str, refresh_token: str, token_endpoint: str) -> str:
     try:
         logger.info("Refreshing Workday access token...")
-
         raw = f"{client_id}:{client_secret}"
         b64 = base64.b64encode(raw.encode()).decode()
-
         headers = {
             "Authorization": f"Basic {b64}",
             "Content-Type": "application/x-www-form-urlencoded",
         }
-
         payload = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
         }
-
         response = requests.post(token_endpoint, headers=headers, data=payload, timeout=30)
         response.raise_for_status()
-
-        access_token = response.json()["access_token"]
-        logger.info("Access token successfully refreshed.")
-        return access_token
-
+        return response.json()["access_token"]
     except Exception as e:
         logger.error(f"ERROR while refreshing Workday access token: {e}")
         raise
 
-def fetch_time_off_report_data(base_endpoint: str, access_token: str, colleague_id: str, prompt_date: str, work_date: str):
-    """
-    Fetches the time off report for a specific colleague and date parameters.
-    Endpoint: .../CRI_INT0137_USA_Datahub_Timeoffs
-    """
+# --- DATA FETCHING (SOURCE) ---
+def get_worker_details_spark():
     try:
-        url = base_endpoint 
-        
-        # Helper to ensure string format
+        query = """
+        SELECT
+            HP.INTERNAL_NUM        AS TimeKeeper,
+            HP.EMPLOYEE_CODE       AS WorkdayId,
+            TT.TOBILL_HRS          AS hrs,
+            year(TRAN_DATE)        AS WorkedYear,
+            TRAN_DATE              AS timecard_worked_date,
+            PERIOD                 AS timecard_worked_cal_period,
+            date_format(to_date(cast(PERIOD as string), 'yyyyMM'), 'MMyy') AS WP_PPYY,
+            POST_DATE              AS Timecard_post_date,
+            HC.CLIENT_CODE,
+            MATTER_CODE,
+            CASE WHEN min(POST_DATE) OVER (PARTITION BY HP.INTERNAL_NUM, TRAN_DATE) = POST_DATE THEN 'I' ELSE 'U' END AS InsertUpdate,
+            HP.`POSITION`          AS jobtitle
+        FROM silver.HBM_MATTER M
+        JOIN silver.TAT_TIME TT ON M.MATTER_UNO = TT.MATTER_UNO
+        JOIN silver.HBM_CLIENT HC ON HC.CLIENT_UNO = M.CLIENT_UNO
+        JOIN silver.HBM_PERSNL HP ON HP.EMPL_UNO = TT.TK_EMPL_UNO
+        JOIN silver.HBL_DEPT HD ON HD.DEPT_CODE = HP.DEPT
+        JOIN silver.HBL_OFFICE HO ON HO.OFFC_CODE = HP.OFFC
+        WHERE MATTER_CODE IN ('8000000028','1000325429','8000000016','1000325434','1000086654')
+          AND year(TRAN_DATE) >= year(current_date()) - 1
+          AND HP.`POSITION` IN ('Associate', 'Counsel')
+          AND HO.OFFC_CODE IN ('AUS1','CHI1','DAL1','DEN1','HOU1','LAX1','IPS1','NYC1','PIT1','SAT1','SFO1','STL1','WAS1')
+          AND lower(HP.`POSITION`) NOT LIKE '%partner%'
+        """
+        logger.info("Executing Spark SQL query...")
+        df = spark.sql(query)
+        rows = [row.asDict() for row in df.collect()]
+        logger.info(f"Found {len(rows)} records.")
+        return rows
+    except NameError:
+        logger.warning("Spark session not available locally. Returning mock data.")
+        return [{"WorkdayId": "50454", "Timecard_post_date": "2026-01-01", "timecard_worked_date": "2026-01-06", "hrs": 8.0}]
+    except Exception as e:
+        logger.error(f"Error executing Spark query: {e}")
+        return []
+
+def fetch_time_off_report_data(base_endpoint: str, access_token: str, colleague_id: str, prompt_date: str, work_date: str):
+    try:
         def fmt_date(d):
-            if isinstance(d, (datetime,)):
-                return d.strftime("%Y-%m-%d")
-            return str(d).split('T')[0] 
+            return d.strftime("%Y-%m-%d") if isinstance(d, datetime) else str(d).split('T')[0]
 
-        prompt_date_str = fmt_date(prompt_date)
-        work_date_str = fmt_date(work_date)
-
-        formatted_prompt_date = f"{prompt_date_str}-08:00"
-        formatted_work_date = f"{work_date_str}-08:00"
+        formatted_prompt = f"{fmt_date(prompt_date)}-08:00"
+        formatted_work = f"{fmt_date(work_date)}-08:00"
         
         params = {
-            "promptDate1": formatted_prompt_date,
+            "promptDate1": formatted_prompt,
             "Include_Terminated_Workers": "0",
             "Colleague_ID": colleague_id,
-            "date": formatted_work_date,
+            "date": formatted_work,
             "format": "json"
         }
-
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/json",
-        }
-
-        response = requests.get(url, headers=headers, params=params, timeout=30)
+        headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+        
+        response = requests.get(base_endpoint, headers=headers, params=params, timeout=30)
         
         if response.status_code == 200:
-            data = response.json()
-            return data.get("Report_Entry", [])
+            return response.json().get("Report_Entry", [])
         else:
-            logger.error(f"Failed to fetch for {colleague_id}: {response.status_code} - {response.text}")
+            logger.error(f"Fetch failed for {colleague_id}: {response.status_code}")
             return []
-
-    except requests.exceptions.Timeout:
-        logger.error(f"TIMEOUT fetching Time Off report for {colleague_id}")
-        return []
     except Exception as e:
-        logger.error(f"ERROR while fetching Time Off report for {colleague_id}: {e}")
+        logger.error(f"Error fetching report: {e}")
         return []
 
-def post_time_off_update(access_token: str, worker_id: str, time_off_entry_wid: str, date_val: str, quantity: str, dry_run: bool = False):
+# --- PAYLOAD BUILDERS ---
+def build_vacation_payload(time_off_entry_wid: str, date_val: str, quantity: str):
     """
-    Sends a POST request to the Absence Management API and returns the parsed result.
-    If dry_run is True, returns a mock success response.
+    Constructs the payload for vacation time off request.
     """
-    url = f"https://wd3-impl-services1.workday.com/ccx/api/absenceManagement/v3/nrf3/workers/{worker_id}/requestTimeOff"
-
-    if "T" not in str(date_val):
-        formatted_date = f"{date_val}T08:00:00.000Z"
-    else:
-        formatted_date = date_val
-
-    payload_dict = {
+    formatted_date = date_val if "T" in str(date_val) else f"{date_val}T08:00:00.000Z"
+    return {
         "days": [
             {
                 "dailyQuantity": str(quantity),
@@ -134,149 +129,84 @@ def post_time_off_update(access_token: str, worker_id: str, time_off_entry_wid: 
             }
         ]
     }
+
+# --- RESPONSE PARSERS ---
+def parse_time_off_response(response_json):
+    """
+    Parses the Workday time off POST response.
+    """
+    try:
+        days_list = response_json.get("days", [])
+        day_entry = days_list[0] if days_list else {}
+        bp_params = response_json.get("businessProcessParameters", {})
+        
+        return {
+            "id": day_entry.get("id"),
+            "descriptor": day_entry.get("descriptor"),
+            "comment": day_entry.get("comment"),
+            "timeOffType_id": day_entry.get("timeOffType", {}).get("id"),
+            "timeOffType_descriptor": day_entry.get("timeOffType", {}).get("descriptor"),
+            "date": day_entry.get("date"),
+            "dailyQuantity": day_entry.get("dailyQuantity"),
+            "transactionStatus": bp_params.get("transactionStatus", {}).get("descriptor")
+        }
+    except Exception as e:
+        logger.error(f"Error parsing response: {e}")
+        return {"parse_error": str(e)}
+
+# --- GENERIC API EXECUTOR ---
+def execute_post_request(url: str, payload: dict, access_token: str, dry_run: bool = False):
+    """
+    Generic function to execute a POST request.
+    """
+    timestamp = datetime.utcnow().isoformat()
     
-    payload = json.dumps(payload_dict)
-    
+    if dry_run:
+        logger.info(f"[DRY RUN] POST {url}")
+        return {
+            "status": "DRY_RUN",
+            "timestamp": timestamp,
+            "url": url,
+            "payload": payload,
+            "success": True # Mock success
+        }
+
     headers = {
         'Content-Type': 'application/json',
         'Authorization': f'Bearer {access_token}'
     }
 
-    timestamp = datetime.utcnow().isoformat()
-
-    if dry_run:
-        logger.info(f"[DRY RUN] Posting time off for {worker_id} on {date_val} with Qty {quantity}")
-        return {
-            "status": "DRY_RUN",
-            "worker_id": worker_id,
-            "date": date_val,
-            "timestamp": timestamp,
-            "payload": payload_dict
-        }
-
     try:
-        response = requests.post(url, headers=headers, data=payload, timeout=30)
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
         
-        log_entry = {
-            "worker_id": worker_id,
-            "request_date": date_val,
-            "request_timestamp": timestamp,
+        result = {
+            "timestamp": timestamp,
             "http_status": response.status_code,
             "response_text": response.text,
-            "success": False
+            "success": response.status_code in (200, 201)
         }
-
-        if response.status_code in (200, 201):
+        
+        if result["success"]:
             try:
-                resp_json = response.json()
-                # Parse specific fields
-                days_list = resp_json.get("days", [])
-                day_entry = days_list[0] if days_list else {}
+                result["json_data"] = response.json()
+            except:
+                result["json_data"] = {}
                 
-                log_entry.update({
-                    "success": True,
-                    "id": day_entry.get("id"),
-                    "descriptor": day_entry.get("descriptor"),
-                    "comment": day_entry.get("comment"),
-                    "timeOffType_id": day_entry.get("timeOffType", {}).get("id"),
-                    "timeOffType_descriptor": day_entry.get("timeOffType", {}).get("descriptor"),
-                    "date": day_entry.get("date"),
-                    "dailyQuantity": day_entry.get("dailyQuantity"),
-                    "transactionStatus": resp_json.get("businessProcessParameters", {}).get("transactionStatus", {}).get("descriptor")
-                })
-                logger.info(f"Successfully posted for {worker_id}. Transaction: {log_entry.get('transactionStatus')}")
-                
-            except Exception as parse_err:
-                logger.error(f"Error parsing response for {worker_id}: {parse_err}")
-                log_entry["parse_error"] = str(parse_err)
-        else:
-            logger.error(f"Failed to post for {worker_id}: {response.status_code} - {response.text}")
-            
-        return log_entry
+        return result
 
     except Exception as e:
-        logger.error(f"ERROR while posting for {worker_id}: {e}")
         return {
-            "worker_id": worker_id,
-            "request_date": date_val,
-            "request_timestamp": timestamp,
+            "timestamp": timestamp,
             "success": False,
             "error": str(e)
         }
 
+# --- BUSINESS LOGIC ---
 def calculate_hours_logic(units, sql_hrs):
     return str(sql_hrs)
 
-def get_worker_details_spark():
-    try:
-        query = """
-        SELECT
-            HP.INTERNAL_NUM        AS TimeKeeper,
-            HP.EMPLOYEE_CODE       AS WorkdayId,
-            TT.TOBILL_HRS          AS hrs,
-            year(TRAN_DATE)        AS WorkedYear,
-            TRAN_DATE              AS timecard_worked_date,
-            PERIOD                 AS timecard_worked_cal_period,
-            date_format(
-                to_date(cast(PERIOD as string), 'yyyyMM'),
-                'MMyy'
-            )                      AS WP_PPYY,
-            POST_DATE              AS Timecard_post_date,
-            HC.CLIENT_CODE,
-            MATTER_CODE,
-            CASE
-                WHEN min(POST_DATE) OVER (PARTITION BY HP.INTERNAL_NUM, TRAN_DATE) = POST_DATE
-                THEN 'I'
-                ELSE 'U'
-            END AS InsertUpdate,
-            HP.`POSITION`          AS jobtitle
-        FROM silver.HBM_MATTER M
-        JOIN silver.TAT_TIME TT
-            ON M.MATTER_UNO = TT.MATTER_UNO
-        JOIN silver.HBM_CLIENT HC
-            ON HC.CLIENT_UNO = M.CLIENT_UNO
-        JOIN silver.HBM_PERSNL HP
-            ON HP.EMPL_UNO = TT.TK_EMPL_UNO
-        JOIN silver.HBL_DEPT HD
-            ON HD.DEPT_CODE = HP.DEPT
-        JOIN silver.HBL_OFFICE HO
-            ON HO.OFFC_CODE = HP.OFFC
-        WHERE MATTER_CODE IN (
-                '8000000028','1000325429','8000000016','1000325434','1000086654'
-              )
-          AND year(TRAN_DATE) >= year(current_date()) - 1
-          AND HP.`POSITION` IN ('Associate', 'Counsel')
-          AND HO.OFFC_CODE IN (
-                'AUS1','CHI1','DAL1','DEN1','HOU1','LAX1',
-                'IPS1','NYC1','PIT1','SAT1','SFO1','STL1','WAS1'
-              )
-          AND lower(HP.`POSITION`) NOT LIKE '%partner%'
-        """
-        logger.info("Executing Spark SQL query to get worker details...")
-        df = spark.sql(query)
-        rows = [row.asDict() for row in df.collect()]
-        logger.info(f"Found {len(rows)} records to process.")
-        return rows
-    except NameError:
-        logger.warning("Spark session not available locally. Returning mock data.")
-        return [
-            {
-                "WorkdayId": "50454", 
-                "Timecard_post_date": "2026-01-01", 
-                "timecard_worked_date": "2026-01-06",
-                "hrs": 8.0
-            }
-        ] 
-    except Exception as e:
-        logger.error(f"Error executing Spark query: {e}")
-        return []
-
 def process_single_row(row, report_endpoint, access_token, dry_run):
-    """
-    Process a single row, calling GET then POST, returning logs.
-    """
     logs = []
-    
     workday_id = row.get("WorkdayId")
     prompt_date = row.get("Timecard_post_date")
     worked_date = row.get("timecard_worked_date")
@@ -285,145 +215,99 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
     if not all([workday_id, prompt_date, worked_date]):
         return logs
 
-    # 1. Fetch
-    entries = fetch_time_off_report_data(
-        report_endpoint, access_token, workday_id, prompt_date, worked_date
-    )
+    # 1. Fetch Existing Entries
+    entries = fetch_time_off_report_data(report_endpoint, access_token, workday_id, prompt_date, worked_date)
     
     if not entries and dry_run:
-        # For mock testing, simulate finding an entry
-        entries = [{
-            "timeOffType": {"descriptor": "Vacation Time Off", "id": "vac123"},
-            "timeOffEntryWid": "entry123",
-            "units": "8"
-        }]
+         # Mock entry for testing
+         entries = [{"timeOffType": {"descriptor": "Vacation"}, "timeOffEntryWid": "mock_wid", "units": "8"}]
 
-    # 2. Process
     for entry in entries:
-        time_off_type_obj = entry.get("timeOffType", {})
-        time_off_type_val = ""
-        if isinstance(time_off_type_obj, dict):
-            time_off_type_val = time_off_type_obj.get("descriptor", "")
-        else:
-            time_off_type_val = str(time_off_type_obj)
+        # Check for Vacation
+        type_desc = str(entry.get("timeOffType", {}).get("descriptor", "") or entry.get("timeOffType", ""))
         
-        if not time_off_type_val and "timeOffType" in entry:
-             time_off_type_val = str(entry["timeOffType"])
-
-        if "Vacation" in time_off_type_val:
-            wid = entry.get("timeOffEntryWid") or entry.get("WID") or entry.get("id")
-            
+        if "Vacation" in type_desc:
+            wid = entry.get("timeOffEntryWid") or entry.get("id")
             if wid:
-                units = entry.get("units")
-                qty = calculate_hours_logic(units, sql_hrs)
+                # 2. Prepare Payload
+                qty = calculate_hours_logic(entry.get("units"), sql_hrs)
+                payload = build_vacation_payload(wid, worked_date, qty)
                 
-                # 3. Post
-                result = post_time_off_update(access_token, workday_id, wid, worked_date, qty, dry_run)
-                logs.append(result)
-    
+                # 3. Define URL
+                url = f"https://wd3-impl-services1.workday.com/ccx/api/absenceManagement/v3/nrf3/workers/{workday_id}/requestTimeOff"
+                
+                # 4. Execute Generic POST
+                result = execute_post_request(url, payload, access_token, dry_run)
+                
+                # 5. Handle Result & Log
+                log_entry = {
+                    "worker_id": workday_id,
+                    "request_date": worked_date,
+                    "success": result["success"],
+                    "timestamp": result["timestamp"]
+                }
+                
+                if result["success"] and not dry_run:
+                    parsed_fields = parse_time_off_response(result.get("json_data", {}))
+                    log_entry.update(parsed_fields)
+                elif dry_run:
+                    log_entry["status"] = "DRY_RUN_SUCCESS"
+                else:
+                    log_entry["error"] = result.get("error") or result.get("response_text")
+                
+                logs.append(log_entry)
+                
     return logs
 
+# --- LOGGING UTILS ---
 def write_logs_to_table(logs_data, table_name="workday_time_off_logs"):
-    """
-    Writes the collected logs to a Delta table.
-    """
     if not logs_data:
-        logger.info("No logs to write.")
         return
-
-    from pyspark.sql.types import StructType, StructField, StringType, BooleanType, DoubleType
-    import json
-    
-    # Flatten/normalize data for DataFrame
-    # Note: Some fields might be missing in some rows, so we should ensure schema consistency
-    # We'll dump the whole thing to JSON then let Spark infer or define schema
-    
     try:
         rdd = spark.sparkContext.parallelize([json.dumps(r) for r in logs_data])
         df_logs = spark.read.json(rdd)
-        
-        logger.info(f"Writing {len(logs_data)} log entries to table {table_name}...")
-        
-        # Save to table (append mode)
-        # Using saveAsTable or insertInto depending on environment
-        # Here assuming managed table
         df_logs.write.mode("append").saveAsTable(table_name)
-        logger.info("Logs successfully written.")
-        
+        logger.info(f"Written {len(logs_data)} logs to {table_name}")
     except NameError:
-        logger.warning("Spark session not found. Skipping log table write.")
+        logger.warning("Spark unavailable - skipping log write")
     except Exception as e:
-        logger.error(f"Error writing logs: {e}")
+        logger.error(f"Log write failed: {e}")
 
-def ingest_time_off_process(
-    client_id: str, 
-    client_secret: str, 
-    refresh_token: str, 
-    token_endpoint: str,
-    report_endpoint: str,
-    max_workers: int = 100,
-    dry_run: bool = False
-):
-    logger.info(f"=== Workday Time Off Processing Started (Dry Run: {dry_run}) ===")
-
-    access_token = refresh_workday_access_token(
-        client_id, client_secret, refresh_token, token_endpoint
-    )
-
+# --- MAIN EXECUTOR ---
+def ingest_time_off_process(client_id, client_secret, refresh_token, token_url, report_url, max_workers=100, dry_run=False):
+    logger.info(f"Starting Process (Dry Run: {dry_run})")
+    
+    token = refresh_workday_access_token(client_id, client_secret, refresh_token, token_url)
     rows = get_worker_details_spark()
     
     all_logs = []
-    
-    logger.info(f"Starting threaded processing with {max_workers} threads...")
-    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_row = {
-            executor.submit(
-                process_single_row, 
-                row, 
-                report_endpoint, 
-                access_token,
-                dry_run
-            ): row 
-            for row in rows
-        }
+        futures = {executor.submit(process_single_row, row, report_url, token, dry_run): row for row in rows}
         
-        completed_count = 0
-        total_rows = len(rows)
-        log_interval = max(max_workers, 10)
-
-        for future in as_completed(future_to_row):
-            completed_count += 1
+        completed = 0
+        for future in as_completed(futures):
+            completed += 1
+            if completed % max(max_workers, 10) == 0:
+                logger.info(f"Progress: {completed}/{len(rows)}")
             try:
                 logs = future.result()
-                if logs:
-                    all_logs.extend(logs)
-                
-                if completed_count % log_interval == 0 or completed_count == total_rows:
-                    logger.info(f"Progress: {completed_count}/{total_rows} records processed.")
-                    
-            except Exception as exc:
-                logger.error(f"Row processing exception: {exc}")
+                if logs: all_logs.extend(logs)
+            except Exception as e:
+                logger.error(f"Row error: {e}")
 
-    # Write logs
     write_logs_to_table(all_logs)
-
-    logger.info("=== Workday Time Off Processing Finished ===")
+    logger.info("Finished.")
 
 if __name__ == "__main__":
+    # Configuration
     CLIENT_ID = "your_client_id"
     CLIENT_SECRET = "your_client_secret"
     REFRESH_TOKEN = "your_refresh_token"
     TOKEN_ENDPOINT = "https://wd3-impl-services1.workday.com/ccx/oauth2/nrf3/token"
     TIMEOFF_REPORT_ENDPOINT = "https://wd3-impl-services1.workday.com/ccx/service/customreport2/nrf3/INT0137_USA_HCM_Datahub_Absence_ISU/CRI_INT0137_USA_Datahub_Timeoffs"
     
-    # Set dry_run=True for "test first part ingestion"
     ingest_time_off_process(
-        CLIENT_ID, 
-        CLIENT_SECRET, 
-        REFRESH_TOKEN, 
-        TOKEN_ENDPOINT, 
-        TIMEOFF_REPORT_ENDPOINT,
+        CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN, TOKEN_ENDPOINT, TIMEOFF_REPORT_ENDPOINT,
         max_workers=100,
         dry_run=True 
     )
