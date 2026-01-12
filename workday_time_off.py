@@ -3,8 +3,16 @@ import base64
 import json
 import time
 import random
+import logging
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # from pyspark.sql.functions import lit # Assuming this runs in a Spark environment
 # from pyspark.sql import SparkSession # Assuming this runs in a Spark environment
@@ -29,7 +37,7 @@ except NameError:
 
 def refresh_workday_access_token(client_id: str, client_secret: str, refresh_token: str, token_endpoint: str) -> str:
     try:
-        print("Refreshing Workday access token...")
+        logger.info("Refreshing Workday access token...")
 
         raw = f"{client_id}:{client_secret}"
         b64 = base64.b64encode(raw.encode()).decode()
@@ -44,15 +52,15 @@ def refresh_workday_access_token(client_id: str, client_secret: str, refresh_tok
             "refresh_token": refresh_token,
         }
 
-        response = requests.post(token_endpoint, headers=headers, data=payload)
+        response = requests.post(token_endpoint, headers=headers, data=payload, timeout=30)
         response.raise_for_status()
 
         access_token = response.json()["access_token"]
-        print("Access token successfully refreshed.")
+        logger.info("Access token successfully refreshed.")
         return access_token
 
     except Exception as e:
-        print("ERROR while refreshing Workday access token:", e)
+        logger.error(f"ERROR while refreshing Workday access token: {e}")
         raise
 
 def fetch_time_off_report_data(base_endpoint: str, access_token: str, colleague_id: str, date_str: str):
@@ -79,18 +87,21 @@ def fetch_time_off_report_data(base_endpoint: str, access_token: str, colleague_
             "Accept": "application/json",
         }
 
-        # print(f"Requesting Time Off for {colleague_id} on {date_str}...")
-        response = requests.get(url, headers=headers, params=params)
+        # logger.debug(f"Requesting Time Off for {colleague_id} on {date_str}...")
+        response = requests.get(url, headers=headers, params=params, timeout=30)
         
         if response.status_code == 200:
             data = response.json()
             return data.get("Report_Entry", [])
         else:
-            print(f"Failed to fetch for {colleague_id} on {date_str}: {response.status_code} - {response.text}")
+            logger.error(f"Failed to fetch for {colleague_id} on {date_str}: {response.status_code} - {response.text}")
             return []
 
+    except requests.exceptions.Timeout:
+        logger.error(f"TIMEOUT fetching Time Off report for {colleague_id} on {date_str}")
+        return []
     except Exception as e:
-        print(f"ERROR while fetching Time Off report for {colleague_id} on {date_str}: {e}")
+        logger.error(f"ERROR while fetching Time Off report for {colleague_id} on {date_str}: {e}")
         return []
 
 def get_worker_details_spark():
@@ -103,17 +114,17 @@ def get_worker_details_spark():
             FROM US_IT_HRIS_LH_L0_LakeHouse.workday_batch_worker_details
             WHERE colleagueId IS NOT NULL
         """
-        print("Executing Spark SQL query to get worker details...")
+        logger.info("Executing Spark SQL query to get worker details...")
         df = spark.sql(query)
         # Collect results to a list of dictionaries [Row(colleagueId='...'), ...]
         workers = [row.asDict() for row in df.collect()]
-        print(f"Found {len(workers)} workers to process.")
+        logger.info(f"Found {len(workers)} workers to process.")
         return workers
     except NameError:
-        print("Spark session not available locally. Returning mock data.")
+        logger.warning("Spark session not available locally. Returning mock data.")
         return [{"colleagueId": "50454"}, {"colleagueId": "61783"}] 
     except Exception as e:
-        print(f"Error executing Spark query: {e}")
+        logger.error(f"Error executing Spark query: {e}")
         return []
 
 def process_single_worker(worker, start_date, today, report_endpoint, access_token):
@@ -154,7 +165,7 @@ def ingest_time_off_history(
     raw_archive_path: str,
     max_workers: int = 100
 ):
-    print("=== Workday Time Off History Ingestion Started ===")
+    logger.info("=== Workday Time Off History Ingestion Started ===")
 
     # 1. Get Token
     access_token = refresh_workday_access_token(
@@ -172,7 +183,7 @@ def ingest_time_off_history(
     # 3. Threading Implementation
     # MAX_WORKERS is now parametrized
     
-    print(f"Starting threaded processing with {max_workers} threads for {len(workers)} workers...")
+    logger.info(f"Starting threaded processing with {max_workers} threads for {len(workers)} workers...")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_worker = {
@@ -190,6 +201,9 @@ def ingest_time_off_history(
         completed_count = 0
         total_workers = len(workers)
         
+        # Log progress based on batch size roughly equal to thread count, or at least 10
+        log_interval = max(max_workers, 10)
+
         for future in as_completed(future_to_worker):
             completed_count += 1
             worker = future_to_worker[future]
@@ -200,11 +214,11 @@ def ingest_time_off_history(
                 if data:
                     all_time_off_data.extend(data)
                 
-                if completed_count % 10 == 0:
-                    print(f"Progress: {completed_count}/{total_workers} workers processed.")
+                if completed_count % log_interval == 0 or completed_count == total_workers:
+                    logger.info(f"Progress: {completed_count}/{total_workers} workers processed.")
                     
             except Exception as exc:
-                print(f"Worker {colleague_id} generated an exception: {exc}")
+                logger.error(f"Worker {colleague_id} generated an exception: {exc}")
 
     # 4. Write ALL results to Lakehouse (Single File)
     if all_time_off_data:
@@ -215,9 +229,9 @@ def ingest_time_off_history(
             raw_archive_path=raw_archive_path
         )
     else:
-        print("No time off data found for any workers.")
+        logger.warning("No time off data found for any workers.")
 
-    print("=== Workday Time Off History Ingestion Finished ===")
+    logger.info("=== Workday Time Off History Ingestion Finished ===")
 
 def write_workday_raw_snapshot_json(
     report_data,
@@ -230,7 +244,7 @@ def write_workday_raw_snapshot_json(
     if isinstance(report_data, dict):
         report_data = [report_data]
  
-    print(f"Writing data to lakehouse, Total Records: {len(report_data)}")
+    logger.info(f"Writing data to lakehouse, Total Records: {len(report_data)}")
     if len(report_data) == 0:
         return
  
@@ -249,7 +263,7 @@ def write_workday_raw_snapshot_json(
             .mode("overwrite") \
             .option("mergeSchema", "true") \
             .save(current_path)
-        print(f"Updated current raw snapshot (Delta) → {current_path}")
+        logger.info(f"Updated current raw snapshot (Delta) → {current_path}")
  
         # 2. Archive Snapshot (Single JSON inside a folder)
         base_archive_dir = f"{raw_archive_path}/Y={now.year}/M={now.month}/D={now.day}"
@@ -274,12 +288,12 @@ def write_workday_raw_snapshot_json(
         
         mssparkutils.fs.mkdirs(specific_archive_dir)
         mssparkutils.fs.put(archive_path, json_content, True)
-        print(f"Archived raw snapshot (Single JSON) → {archive_path}")
+        logger.info(f"Archived raw snapshot (Single JSON) → {archive_path}")
  
     except NameError:
-        print("Spark session not found. Skipping write step (simulated).")
+        logger.warning("Spark session not found. Skipping write step (simulated).")
     except Exception as e:
-        print(f"Error in write step: {e}")
+        logger.error(f"Error in write step: {e}")
         raise e
 
 if __name__ == "__main__":
