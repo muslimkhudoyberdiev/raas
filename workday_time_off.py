@@ -234,6 +234,7 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
          entries = [{"timeOffType": {"descriptor": "Vacation"}, "timeOffEntryWid": "mock_wid", "units": "8"}]
 
     for entry in entries:
+        logger.info(f"DEBUG RAW ENTRY: {json.dumps(entry, indent=2)}")
         # Check for Vacation
         type_desc = str(entry.get("timeOffType", {}).get("descriptor", "") or entry.get("timeOffType", ""))
         logger.info(f"Checking Entry Type: '{type_desc}' (WID: {entry.get('timeOffEntryWid') or entry.get('id')})")
