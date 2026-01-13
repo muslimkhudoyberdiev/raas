@@ -262,9 +262,13 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
             logger.info(f"Vacation Match! WID found: {wid}")
 
             if wid:
+                logger.info(f"--- GET Response (Source) ---\n{json.dumps(entry, indent=2)}")
+                
                 # 2. Prepare Payload
                 qty = calculate_hours_logic(entry.get("units"), sql_hrs)
                 payload = build_vacation_payload(wid, worked_date, qty)
+                
+                logger.info(f"--- POST Payload ---\n{json.dumps(payload, indent=2)}")
                 
                 # 3. Define URL
                 url = f"https://wd3-impl-services1.workday.com/ccx/api/absenceManagement/v3/nrf3/workers/{workday_id}/requestTimeOff"
@@ -277,7 +281,9 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
                     "worker_id": workday_id,
                     "request_date": worked_date,
                     "success": result["success"],
-                    "timestamp": result["timestamp"]
+                    "timestamp": result["timestamp"],
+                    "get_response_fragment": json.dumps(entry),
+                    "post_payload": json.dumps(payload)
                 }
                 
                 if result["success"] and not dry_run:
