@@ -229,61 +229,78 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
          # Mock entry for testing
          entries = [{"timeOffType": {"descriptor": "Vacation"}, "timeOffEntryWid": "mock_wid", "units": "8"}]
 
-    for entry in entries:
-        # Robust extraction attempt
-        # Try to find Time Off Type
-        type_obj = entry.get("timeOffType") or entry.get("Time_Off_Type") or entry.get("TimeOffType")
-        type_desc = ""
-        if isinstance(type_obj, dict):
-             type_desc = type_obj.get("descriptor", "") or type_obj.get("@Descriptor", "")
-        elif isinstance(type_obj, str):
-             type_desc = type_obj
+    for parent_entry in entries:
+        # The report structure might be nested.
+        # Check for 'Time_Off_Completed_Details_group' or handle flat structure.
         
-        # If still empty, check if it's a flat key like "Time_Off_Type_descriptor"
-        if not type_desc:
-             type_desc = entry.get("timeOffType_descriptor") or entry.get("Time_Off_Type_descriptor") or ""
+        # Determine list of items to inspect
+        items_to_inspect = []
+        if "Time_Off_Completed_Details_group" in parent_entry:
+            group = parent_entry["Time_Off_Completed_Details_group"]
+            if isinstance(group, list):
+                items_to_inspect.extend(group)
+            elif isinstance(group, dict):
+                items_to_inspect.append(group)
+        else:
+            # Fallback: assume the entry itself is the item
+            items_to_inspect.append(parent_entry)
 
-        if "Vacation" in type_desc:
-            # Try to find WID
-            wid = entry.get("timeOffEntryWid") or entry.get("Time_Off_Entry_WID") or entry.get("id") or entry.get("WID")
-            if isinstance(wid, dict): # Sometimes WID is an object?
-                 wid = wid.get("id") or wid.get("#text")
+        for entry in items_to_inspect:
+            # Robust extraction attempt
+            # Try to find Time Off Type
+            type_obj = entry.get("timeOffType") or entry.get("Time_Off_Type") or entry.get("TimeOffType")
+            type_desc = ""
+            if isinstance(type_obj, dict):
+                type_desc = type_obj.get("descriptor", "") or type_obj.get("@Descriptor", "")
+            elif isinstance(type_obj, str):
+                type_desc = type_obj
             
-            if wid:
-                logger.info(f"Vacation Match! WID found: {wid}")
-                logger.info(f"--- GET Response (Source) ---\n{json.dumps(entry, indent=2)}")
+            # If still empty, check if it's a flat key like "Time_Off_Type_descriptor"
+            if not type_desc:
+                type_desc = entry.get("timeOffType_descriptor") or entry.get("Time_Off_Type_descriptor") or ""
+
+            if "Vacation" in type_desc:
+                # Try to find WID
+                wid = entry.get("timeOffEntryWid") or entry.get("Time_Off_Entry_WID") or entry.get("id") or entry.get("WID")
+                if isinstance(wid, dict): 
+                    wid = wid.get("id") or wid.get("#text")
                 
-                # 2. Prepare Payload
-                qty = calculate_hours_logic(entry.get("units"), sql_hrs)
-                payload = build_vacation_payload(wid, worked_date, qty)
-                
-                logger.info(f"--- POST Payload ---\n{json.dumps(payload, indent=2)}")
-                
-                # 3. Define URL
-                url = f"https://wd3-impl-services1.workday.com/ccx/api/absenceManagement/v3/nrf3/workers/{workday_id}/requestTimeOff"
-                
-                # 4. Execute Generic POST
-                result = execute_post_request(url, payload, access_token, dry_run)
-                
-                # 5. Handle Result & Log
-                log_entry = {
-                    "worker_id": workday_id,
-                    "request_date": worked_date,
-                    "success": result["success"],
-                    "timestamp": result["timestamp"],
-                    "get_response_fragment": json.dumps(entry),
-                    "post_payload": json.dumps(payload)
-                }
-                
-                if result["success"] and not dry_run:
-                    parsed_fields = parse_time_off_response(result.get("json_data", {}))
-                    log_entry.update(parsed_fields)
-                elif dry_run:
-                    log_entry["status"] = "DRY_RUN_SUCCESS"
-                else:
-                    log_entry["error"] = result.get("error") or result.get("response_text")
-                
-                logs.append(log_entry)
+                if wid:
+                    logger.info(f"Vacation Match! WID found: {wid}")
+                    # Log the specific inner entry that matched
+                    logger.info(f"--- GET Response (Source) ---\n{json.dumps(entry, indent=2)}")
+                    
+                    # 2. Prepare Payload
+                    qty = calculate_hours_logic(entry.get("units"), sql_hrs)
+                    payload = build_vacation_payload(wid, worked_date, qty)
+                    
+                    logger.info(f"--- POST Payload ---\n{json.dumps(payload, indent=2)}")
+                    
+                    # 3. Define URL
+                    url = f"https://wd3-impl-services1.workday.com/ccx/api/absenceManagement/v3/nrf3/workers/{workday_id}/requestTimeOff"
+                    
+                    # 4. Execute Generic POST
+                    result = execute_post_request(url, payload, access_token, dry_run)
+                    
+                    # 5. Handle Result & Log
+                    log_entry = {
+                        "worker_id": workday_id,
+                        "request_date": worked_date,
+                        "success": result["success"],
+                        "timestamp": result["timestamp"],
+                        "get_response_fragment": json.dumps(entry),
+                        "post_payload": json.dumps(payload)
+                    }
+                    
+                    if result["success"] and not dry_run:
+                        parsed_fields = parse_time_off_response(result.get("json_data", {}))
+                        log_entry.update(parsed_fields)
+                    elif dry_run:
+                        log_entry["status"] = "DRY_RUN_SUCCESS"
+                    else:
+                        log_entry["error"] = result.get("error") or result.get("response_text")
+                    
+                    logs.append(log_entry)
                 
     return logs
 
