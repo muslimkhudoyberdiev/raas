@@ -220,23 +220,16 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
     sql_hrs = row.get("hrs")
 
     if not all([workday_id, prompt_date, worked_date]):
-        logger.warning(f"Skipping row missing data: {row}")
         return logs
-
-    logger.info(f"Processing Worker: {workday_id}, Date: {worked_date}, Prompt: {prompt_date}")
 
     # 1. Fetch Existing Entries
     entries = fetch_time_off_report_data(report_endpoint, access_token, workday_id, prompt_date, worked_date)
-    logger.info(f"Fetched {len(entries)} entries for {workday_id}")
     
     if not entries and dry_run:
          # Mock entry for testing
          entries = [{"timeOffType": {"descriptor": "Vacation"}, "timeOffEntryWid": "mock_wid", "units": "8"}]
 
     for entry in entries:
-        logger.info(f"DEBUG RAW ENTRY keys: {list(entry.keys())}")
-        logger.info(f"DEBUG RAW ENTRY content: {json.dumps(entry, indent=2)}")
-        
         # Robust extraction attempt
         # Try to find Time Off Type
         type_obj = entry.get("timeOffType") or entry.get("Time_Off_Type") or entry.get("TimeOffType")
@@ -250,18 +243,14 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
         if not type_desc:
              type_desc = entry.get("timeOffType_descriptor") or entry.get("Time_Off_Type_descriptor") or ""
 
-        # Check for Vacation
-        logger.info(f"Checking Entry Type: '{type_desc}'")
-        
         if "Vacation" in type_desc:
             # Try to find WID
             wid = entry.get("timeOffEntryWid") or entry.get("Time_Off_Entry_WID") or entry.get("id") or entry.get("WID")
             if isinstance(wid, dict): # Sometimes WID is an object?
                  wid = wid.get("id") or wid.get("#text")
             
-            logger.info(f"Vacation Match! WID found: {wid}")
-
             if wid:
+                logger.info(f"Vacation Match! WID found: {wid}")
                 logger.info(f"--- GET Response (Source) ---\n{json.dumps(entry, indent=2)}")
                 
                 # 2. Prepare Payload
