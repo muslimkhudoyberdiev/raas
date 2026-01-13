@@ -272,6 +272,10 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
                 
                 if wid:
                     logger.info(f"Vacation Match! WID found: {wid}")
+                    
+                    # Context Log
+                    logger.info(f"--- Context (Source) ---\nWorker: {workday_id}\nPrompt Date: {prompt_date}\nWorked Date: {worked_date}")
+                    
                     # Log the specific inner entry that matched
                     logger.info(f"--- GET Response (Source) ---\n{json.dumps(entry, indent=2)}")
                     
