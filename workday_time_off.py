@@ -69,7 +69,6 @@ def get_worker_details_spark():
           AND HP.`POSITION` IN ('Associate', 'Counsel')
           AND HO.OFFC_CODE IN ('AUS1','CHI1','DAL1','DEN1','HOU1','LAX1','IPS1','NYC1','PIT1','SAT1','SFO1','STL1','WAS1')
           AND lower(HP.`POSITION`) NOT LIKE '%partner%'
-        LIMIT 1
         """
         logger.info("Executing Spark SQL query...")
         df = spark.sql(query)
