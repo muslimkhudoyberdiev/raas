@@ -79,12 +79,54 @@ class PeopleDataQualityValidator:
             StructField("status", StringType(), True)
         ])
         
+        # When lakehouse_name is provided (which is the SQL endpoint in this case),
+        # we treat it as a Catalog if it is a valid catalog name. 
+        # But if the user wants to write to a specific Schema.Table in the current context
+        # without 3-part naming, we should be careful.
+        
+        # Based on user feedback: "Saving 2 logs to Audit.AuditLogs... Successfully saved ... table not generated under that schema"
+        # This implies it might be saving to a local "Audit" database/schema in the spark session, not the intended warehouse.
+        
+        # If the user provided the long warehouse URL as `lakehouse_name` in main(),
+        # `prefix` becomes "hbvkj....com."
+        # `log_table_name` becomes "hbvkj....com.audit.AuditLogs".
+        
+        # If the output says "Saving ... to Audit.AuditLogs", it implies `lakehouse_name` was None or empty string when this ran?
+        # OR the print statement was misleading?
+        # Wait, in the logs provided by user: "Saving 2 logs to Audit.AuditLogs..."
+        # This means `prefix` was empty!
+        # Which means `lakehouse_name` passed to this function was None or empty.
+        
+        # Let's check main()
+        # LAKEHOUSE_NAME = "..."
+        # validator.save_logs_to_table(lakehouse_name=LAKEHOUSE_NAME)
+        # But wait, the indentation in my previous edit for main() might have been wrong.
+        # I dedented the call to `save_logs_to_table` to be outside the loop (which is correct to save all at once),
+        # BUT `validator` is re-initialized INSIDE the loop.
+        # So `validator` only has results for the LAST schema processed if called outside.
+        # AND if `validator` variable scope in python: it persists after loop.
+        
+        # However, the user provided code snippet showed:
+        # for current_schema in schemas:
+        #    validator = ...
+        #    ...
+        #    # 4. Save Logs
+        #    validator.save_logs_to_table()
+        
+        # In my previous edit I fixed indentation of `LAKEHOUSE_NAME` but I might have moved it OUTSIDE the loop in `main`?
+        # No, I only fixed indentation of those lines.
+        # But let's look at `main` structure in the file currently.
+        
         prefix = f"{lakehouse_name}." if lakehouse_name else ""
-        log_table_name = f"{prefix}audit.AuditLogs"
+        # Ensure the table name is fully qualified if needed, or use 3-part name if lakehouse is catalog.
+        # If lakehouse_name is the warehouse name, 3-part name is: Warehouse.Schema.Table
+        
+        log_table_name = f"{prefix}Audit.AuditLogs"
         
         print(f"Saving {len(self.results)} logs to {log_table_name}...")
         try:
             df_log = self.spark.createDataFrame(self.results, schema)
+            # Use saveAsTable with fully qualified name
             df_log.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(log_table_name)
             print(f"Successfully saved to {log_table_name}.")
         except Exception as e:
@@ -228,8 +270,8 @@ def main():
             print(f"Error processing {full_table_name}: {e}")
         
         # 4. Save Logs
-    LAKEHOUSE_NAME = "hbvkj6b5fvzenlsxgtupezx6wq-f5va56hadvsuhlocx4wmlexjv4.datawarehouse.fabric.microsoft.com"
-    validator.save_logs_to_table(lakehouse_name=LAKEHOUSE_NAME)
+        LAKEHOUSE_NAME = "hbvkj6b5fvzenlsxgtupezx6wq-f5va56hadvsuhlocx4wmlexjv4.datawarehouse.fabric.microsoft.com"
+        validator.save_logs_to_table(lakehouse_name=LAKEHOUSE_NAME)
         
         failed_checks = [r for r in validator.results if r['status'] in ['FAIL', 'ERROR']]
         if failed_checks:
