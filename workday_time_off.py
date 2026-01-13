@@ -223,9 +223,15 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
         return logs
 
     # 1. Fetch Existing Entries
+    logger.info(f"--- GET Request (Fetch Report) ---\nEndpoint: {report_endpoint}\nParams: Colleague_ID={workday_id}, promptDate1={prompt_date}, date={worked_date}")
     entries = fetch_time_off_report_data(report_endpoint, access_token, workday_id, prompt_date, worked_date)
     
+    # If no entries found in REAL mode, we stop here.
+    # If dry_run is True AND no entries found, we use mock data.
+    # The user saw "mock_wid" because dry_run was True and the real fetch returned 0 entries.
+    
     if not entries and dry_run:
+         logger.info("No entries found in dry_run mode. Using MOCK data for demonstration.")
          # Mock entry for testing
          entries = [{"timeOffType": {"descriptor": "Vacation"}, "timeOffEntryWid": "mock_wid", "units": "8"}]
 
