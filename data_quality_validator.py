@@ -62,8 +62,12 @@ class PeopleDataQualityValidator:
         else:
             self.log_result(table_name, f"Uniqueness Check - {key_columns}", "PASS", "Unique keys valid")
 
-    def save_logs_to_table(self, lakehouse_name=None):
-        """Saves validation results to Delta tables dynamically based on the schema of the validated table."""
+    def save_logs_to_table(self, lakehouse_name=None, target_table_name=None):
+        """Saves validation results to Delta tables.
+        
+        If target_table_name is provided, all logs are saved to that table.
+        Otherwise, logs are saved dynamically based on the schema of the validated table ({lakehouse}.{schema}.AuditLogs).
+        """
         if not self.results:
             print("No results to save.")
             return
@@ -79,6 +83,17 @@ class PeopleDataQualityValidator:
             StructField("status", StringType(), True)
         ])
         
+        # If a specific target table is provided, save all results there
+        if target_table_name:
+            print(f"Saving {len(self.results)} logs to {target_table_name}...")
+            try:
+                df_log = self.spark.createDataFrame(self.results, schema)
+                df_log.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(target_table_name)
+                print(f"Successfully saved to {target_table_name}.")
+            except Exception as e:
+                print(f"Error saving to {target_table_name}: {str(e)}")
+            return
+
         # Group results by target schema/table for logging
         # We assume the log table is {Schema}.AuditLogs
         logs_by_schema = {}
@@ -187,7 +202,7 @@ def main():
         print(f"Error processing table: {e}")
 
     # Save Logs (Dynamically to {Schema}.AuditLogs)
-    LAKEHOUSE_NAME = None 
+    LAKEHOUSE_NAME = "hbvkj6b5fvzenlsxgtupezx6wq-f5va56hadvsuhlocx4wmlexjv4.datawarehouse.fabric.microsoft.com" 
     validator.save_logs_to_table(lakehouse_name=LAKEHOUSE_NAME)
 
     # Display Summary
