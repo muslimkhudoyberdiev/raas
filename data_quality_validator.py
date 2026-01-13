@@ -269,16 +269,16 @@ def main():
             validator.log_result(full_table_name, "Load/Process Table", "ERROR", str(e))
             print(f"Error processing {full_table_name}: {e}")
         
-        # 4. Save Logs
-        LAKEHOUSE_NAME = "hbvkj6b5fvzenlsxgtupezx6wq-f5va56hadvsuhlocx4wmlexjv4.datawarehouse.fabric.microsoft.com"
-        validator.save_logs_to_table(lakehouse_name=LAKEHOUSE_NAME)
-        
-        failed_checks = [r for r in validator.results if r['status'] in ['FAIL', 'ERROR']]
-        if failed_checks:
-            print(f"WARNING: {len(failed_checks)} checks failed for {current_schema}.")
-            sys.exit(1)
-        else:
-            print(f"SUCCESS: All checks passed for {current_schema}.")
+    # 4. Save Logs
+    LAKEHOUSE_NAME = "hbvkj6b5fvzenlsxgtupezx6wq-f5va56hadvsuhlocx4wmlexjv4.datawarehouse.fabric.microsoft.com"
+    validator.save_logs_to_table(lakehouse_name=LAKEHOUSE_NAME)
+    
+    failed_checks = [r for r in validator.results if r['status'] in ['FAIL', 'ERROR']]
+    if failed_checks:
+        print(f"WARNING: {len(failed_checks)} checks failed for {current_schema}.")
+        sys.exit(1)
+    else:
+        print(f"SUCCESS: All checks passed for {current_schema}.")
 
 if __name__ == "__main__":
     main()
