@@ -270,7 +270,7 @@ def main():
             print(f"Error processing {full_table_name}: {e}")
         
     # 4. Save Logs
-    LAKEHOUSE_NAME = "hbvkj6b5fvzenlsxgtupezx6wq-f5va56hadvsuhlocx4wmlexjv4.datawarehouse.fabric.microsoft.com"
+    LAKEHOUSE_NAME = "`hbvkj6b5fvzenlsxgtupezx6wq-f5va56hadvsuhlocx4wmlexjv4.datawarehouse.fabric.microsoft.com`"
     validator.save_logs_to_table(lakehouse_name=LAKEHOUSE_NAME)
     
     failed_checks = [r for r in validator.results if r['status'] in ['FAIL', 'ERROR']]
