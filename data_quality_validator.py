@@ -143,8 +143,8 @@ def get_spark_session():
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Run Dynamic Data Quality Checks')
-    parser.add_argument('--schema', type=str, required=True, help='Database Schema Name')
-    parser.add_argument('--table', type=str, required=True, help='Table Name')
+    parser.add_argument('--schema', type=str, required=False, help='Database Schema Name')
+    parser.add_argument('--table', type=str, required=False, help='Table Name')
     parser.add_argument('--columns', type=str, required=False, help='Comma separated list of columns to check')
     parser.add_argument('--rules', type=str, required=False, help='JSON rules for checks')
     parser.add_argument('--run_id', type=str, required=False, help='Pipeline Run ID')
@@ -171,11 +171,31 @@ def main():
         rules = args.rules
         run_id = args.run_id
     else:
-        # If no CLI args, we could try to look for them in Spark conf or environment variables
-        # This part mimics the notebook logic where variables might just exist
-        # For a pure .py script, this is less common unless using specific runners
-        print("No arguments provided via CLI. Exiting.")
-        sys.exit(1)
+        # Check if variables exist in the global scope (for notebook usage)
+        # In a standard python script, these won't "just exist" unless injected. 
+        # But we can look for them if the user modifies the script to define them at the top level
+        # or expects us to use the specific hardcoded values requested.
+        
+        # Since the user specifically said "i have variables with parameters" and provided values,
+        # I will inject these defaults here for when no CLI args are present.
+        
+        # Default/Hardcoded values for manual testing/notebook usage
+        schema = globals().get('schema', "Worker_HR")
+        table = globals().get('table', "Education_1")
+        run_id = globals().get('run_id', "MANUAL_TEST_RUN")
+        rules_default = """
+{
+    "null_cols": ["Colleague_ID"],
+    "unique_keys": [
+        ["Colleague_ID","Degree_ID"]
+    ]
+}
+"""
+        rules = globals().get('rules', rules_default)
+        columns = globals().get('columns', None)
+
+        print("Using default/global variables since no CLI arguments provided.")
+
 
     if not run_id or run_id == "MANUAL_TEST_RUN":
         run_id = spark.conf.get("spark.fabric.runId", "MANUAL_RUN_" + datetime.now().strftime("%Y%m%d%H%M%S"))
