@@ -62,12 +62,7 @@ class PeopleDataQualityValidator:
         else:
             self.log_result(table_name, f"Uniqueness Check - {key_columns}", "PASS", "Unique keys valid")
 
-    def save_logs_to_table(self, lakehouse_name=None, target_table_name=None):
-        """Saves validation results to Delta tables.
-        
-        If target_table_name is provided, all logs are saved to that table.
-        Otherwise, logs are saved dynamically based on the schema of the validated table ({lakehouse}.{schema}.AuditLogs).
-        """
+    def save_logs_to_table(self, lakehouse_name=None):
         if not self.results:
             print("No results to save.")
             return
@@ -76,6 +71,7 @@ class PeopleDataQualityValidator:
             StructField("run_id", StringType(), True),
             StructField("pipeline_name", StringType(), True),
             StructField("test_timestamp", TimestampType(), True),
+            StructField("schema_name", StringType(), True),
             StructField("table_name", StringType(), True),
             StructField("test_check", StringType(), True),
             StructField("record_count", IntegerType(), True),
@@ -83,56 +79,16 @@ class PeopleDataQualityValidator:
             StructField("status", StringType(), True)
         ])
         
-        # If a specific target table is provided, save all results there
-        if target_table_name:
-            print(f"Saving {len(self.results)} logs to {target_table_name}...")
-            try:
-                df_log = self.spark.createDataFrame(self.results, schema)
-                df_log.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(target_table_name)
-                print(f"Successfully saved to {target_table_name}.")
-            except Exception as e:
-                print(f"Error saving to {target_table_name}: {str(e)}")
-            return
-
-        # Group results by target schema/table for logging
-        # We assume the log table is {Schema}.AuditLogs
-        logs_by_schema = {}
-        
         prefix = f"{lakehouse_name}." if lakehouse_name else ""
- 
-        for res in self.results:
-            full_table_name = res["table_name"]
-            
-            # Attempt to parse schema from table name
-            # Format usually: [Lakehouse.]Schema.Table
-            parts = full_table_name.split('.')
-            target_schema = None
-            
-            # Heuristic to find schema
-            if len(parts) >= 2:
-                # The table name is the last part, the schema is the second to last
-                target_schema = parts[-2]
-            else:
-                print(f"Warning: Could not extract schema from {full_table_name}. Skipping.")
-                continue
-            
-            # Construct the log table path
-            log_table = f"{prefix}{target_schema}.AuditLogs"
-            
-            if log_table not in logs_by_schema:
-                logs_by_schema[log_table] = []
-            
-            logs_by_schema[log_table].append(res)
-            
-        # Save batches
-        for log_table_name, records in logs_by_schema.items():
-            print(f"Saving {len(records)} logs to {log_table_name}...")
-            try:
-                df_log = self.spark.createDataFrame(records, schema)
-                df_log.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(log_table_name)
-                print(f"Successfully saved to {log_table_name}.")
-            except Exception as e:
-                print(f"Error saving to {log_table_name}: {str(e)}")
+        log_table_name = f"{prefix}audit.AuditLogs"
+        
+        print(f"Saving {len(self.results)} logs to {log_table_name}...")
+        try:
+            df_log = self.spark.createDataFrame(self.results, schema)
+            df_log.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(log_table_name)
+            print(f"Successfully saved to {log_table_name}.")
+        except Exception as e:
+            print(f"Error saving to {log_table_name}: {str(e)}")
 
 def get_spark_session():
     try:
@@ -272,8 +228,8 @@ def main():
             print(f"Error processing {full_table_name}: {e}")
         
         # 4. Save Logs
-        LAKEHOUSE_NAME = "hbvkj6b5fvzenlsxgtupezx6wq-f5va56hadvsuhlocx4wmlexjv4.datawarehouse.fabric.microsoft.com" 
-        validator.save_logs_to_table(lakehouse_name=LAKEHOUSE_NAME)
+    LAKEHOUSE_NAME = "hbvkj6b5fvzenlsxgtupezx6wq-f5va56hadvsuhlocx4wmlexjv4.datawarehouse.fabric.microsoft.com"
+    validator.save_logs_to_table(lakehouse_name=LAKEHOUSE_NAME)
         
         failed_checks = [r for r in validator.results if r['status'] in ['FAIL', 'ERROR']]
         if failed_checks:
