@@ -221,24 +221,24 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
     if not all([workday_id, prompt_date, worked_date]):
         return logs
 
-    # 1. Fetch Existing Entries
-    # logger.info(f"--- GET Request (Fetch Report) ---\nEndpoint: {report_endpoint}\nParams: Colleague_ID={workday_id}, promptDate1={prompt_date}, date={worked_date}")
+    # 1. Log GET Request details (ALWAYS)
+    logger.info(f"--- GET Request (Fetch Report) ---\nEndpoint: {report_endpoint}\nParams: Colleague_ID={workday_id}, promptDate1={prompt_date}, date={worked_date}")
+    
+    # 2. Fetch Existing Entries
     entries = fetch_time_off_report_data(report_endpoint, access_token, workday_id, prompt_date, worked_date)
     
-    # If no entries found in REAL mode, we stop here.
-    # If dry_run is True AND no entries found, we use mock data.
-    # The user saw "mock_wid" because dry_run was True and the real fetch returned 0 entries.
-    
+    # 3. Log GET Response summary/content (ALWAYS)
+    if entries:
+        logger.info(f"--- GET Response (Source) ---\nFetched {len(entries)} entries. Content:\n{json.dumps(entries, indent=2)}")
+    else:
+        logger.info("--- GET Response (Source) ---\nFetched 0 entries.")
+
     if not entries and dry_run:
-         # logger.info("No entries found in dry_run mode. Using MOCK data for demonstration.")
          # Mock entry for testing
          entries = [{"timeOffType": {"descriptor": "Vacation"}, "timeOffEntryWid": "mock_wid", "units": "8"}]
 
     for parent_entry in entries:
-        # The report structure might be nested.
-        # Check for 'Time_Off_Completed_Details_group' or handle flat structure.
-        
-        # Determine list of items to inspect
+        # Determine list of items to inspect (handle nesting)
         items_to_inspect = []
         if "Time_Off_Completed_Details_group" in parent_entry:
             group = parent_entry["Time_Off_Completed_Details_group"]
@@ -247,12 +247,10 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
             elif isinstance(group, dict):
                 items_to_inspect.append(group)
         else:
-            # Fallback: assume the entry itself is the item
             items_to_inspect.append(parent_entry)
 
         for entry in items_to_inspect:
             # Robust extraction attempt
-            # Try to find Time Off Type
             type_obj = entry.get("timeOffType") or entry.get("Time_Off_Type") or entry.get("TimeOffType")
             type_desc = ""
             if isinstance(type_obj, dict):
@@ -260,24 +258,16 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
             elif isinstance(type_obj, str):
                 type_desc = type_obj
             
-            # If still empty, check if it's a flat key like "Time_Off_Type_descriptor"
             if not type_desc:
                 type_desc = entry.get("timeOffType_descriptor") or entry.get("Time_Off_Type_descriptor") or ""
 
             if "Vacation" in type_desc:
-                # Try to find WID
                 wid = entry.get("timeOffEntryWid") or entry.get("Time_Off_Entry_WID") or entry.get("id") or entry.get("WID")
                 if isinstance(wid, dict): 
                     wid = wid.get("id") or wid.get("#text")
                 
                 if wid:
                     logger.info(f"Vacation Match! WID found: {wid}")
-                    
-                    # Context Log
-                    logger.info(f"--- Context (Source) ---\nWorker: {workday_id}\nPrompt Date: {prompt_date}\nWorked Date: {worked_date}")
-                    
-                    # Log the specific inner entry that matched
-                    logger.info(f"--- GET Response (Source) ---\n{json.dumps(entry, indent=2)}")
                     
                     # 2. Prepare Payload
                     qty = calculate_hours_logic(entry.get("units"), sql_hrs)
@@ -310,6 +300,8 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
                         log_entry["error"] = result.get("error") or result.get("response_text")
                     
                     logs.append(log_entry)
+            elif type_desc:
+                 logger.info(f"Skipped Non-Vacation Entry: '{type_desc}' (WID: {entry.get('timeOffEntryWid') or 'None'})")
                 
     return logs
 
