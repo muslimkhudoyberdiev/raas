@@ -202,7 +202,7 @@ def get_supported_type_key(type_desc: str) -> str:
 
 # --- PAYLOAD BUILDERS ---
 def build_time_off_payload(time_off_entry_wid: str, date_val: str, quantity: str, time_off_type_key: str):
-    """Construct the payload for time off request based on type."""
+    """Construct the payload for ENTER time off request based on type."""
     formatted_date = date_val if "T" in str(date_val) else f"{date_val}T08:00:00.000Z"
     
     type_config = SUPPORTED_TIME_OFF_TYPES.get(time_off_type_key, SUPPORTED_TIME_OFF_TYPES["Vacation"])
@@ -215,6 +215,28 @@ def build_time_off_payload(time_off_entry_wid: str, date_val: str, quantity: str
                 "timeOffType": {
                     "descriptor": type_config["descriptor"],
                     "id": time_off_entry_wid 
+                },
+                "date": formatted_date
+            }
+        ]
+    }
+
+
+def build_adjust_time_off_payload(time_off_entry_wid: str, date_val: str, quantity: str = "0"):
+    """
+    Construct the payload for ADJUST time off request (used to zero out existing entries).
+    
+    Note: To update an entry, you must first adjust it to zero, then enter the new value.
+    """
+    formatted_date = date_val if "T" in str(date_val) else f"{date_val}T08:00:00.000Z"
+    
+    return {
+        "days": [
+            {
+                "dailyQuantity": str(quantity),
+                "comment": "INT0137 - Adjustment",
+                "timeOffEntry": {
+                    "id": time_off_entry_wid
                 },
                 "date": formatted_date
             }
@@ -330,32 +352,106 @@ def flatten_time_off_entries(parent_entry):
 
 
 # --- BUSINESS LOGIC ---
-def calculate_quantity(time_off_type_key: str, entry_units: str, sql_hrs: float) -> str:
+def calculate_quantity(time_off_type_key: str, entry_units: str, sql_hrs: float, insert_update: str = "I") -> dict:
     """
-    Calculate the quantity to submit based on time off type.
+    Calculate the quantity to submit based on time off type and insert/update flag.
     
     Logic:
-    - Vacation: Use sql_hrs directly (hours from SQL query)
-    - Lawyer Supplement Time Off: Convert sql_hrs to days (8 hours = 1 day)
+    - INSERT (I): Use sql_hrs directly (new entry)
+    - UPDATE (U): sql_hrs is NEGATIVE (reduction amount)
+      - Need to zero out first, then re-enter with new value
+      - New value = existing units + sql_hrs (since sql_hrs is negative)
+    
+    For Lawyer Supplement Time Off:
+    - Uses Days as unit (not Hours)
+    - sql_hrs is already in days from the source
     
     Args:
         time_off_type_key: The type of time off (e.g., "Vacation", "Lawyer Supplement Time Off")
-        entry_units: The units value from the API response entry
-        sql_hrs: Hours from the SQL query
+        entry_units: The existing units value from the API response entry
+        sql_hrs: Hours/Days from the SQL query (negative for updates)
+        insert_update: "I" for insert, "U" for update
         
     Returns:
-        Calculated quantity as string
+        Dictionary with:
+        - quantity: The quantity to enter
+        - needs_zero_out: Whether we need to zero out first (for updates)
+        - is_removal: Whether this is a complete removal (quantity = 0)
     """
-    if time_off_type_key == "Lawyer Supplement Time Off":
-        # Lawyer Supplement uses Days - convert hours to days (8 hours = 1 day)
-        if sql_hrs:
-            days = float(sql_hrs) / 8.0
-            return str(round(days, 2))
-        # Fallback to entry units if sql_hrs not available
-        return str(entry_units) if entry_units else "1"
+    result = {
+        "quantity": "0",
+        "needs_zero_out": False,
+        "is_removal": False
+    }
+    
+    # Parse existing units from API response
+    existing_units = 0.0
+    if entry_units:
+        try:
+            existing_units = float(entry_units)
+        except (ValueError, TypeError):
+            existing_units = 0.0
+    
+    # Parse sql_hrs
+    hrs_value = 0.0
+    if sql_hrs is not None:
+        try:
+            hrs_value = float(sql_hrs)
+        except (ValueError, TypeError):
+            hrs_value = 0.0
+    
+    if insert_update == "U":
+        # UPDATE case: sql_hrs is negative (reduction amount)
+        # Need to zero out first, then re-enter with new value
+        result["needs_zero_out"] = True
+        
+        # Calculate new quantity: existing + adjustment (adjustment is negative)
+        new_quantity = existing_units + hrs_value
+        
+        if new_quantity <= 0:
+            # Complete removal - just zero out
+            result["quantity"] = "0"
+            result["is_removal"] = True
+        else:
+            result["quantity"] = str(round(new_quantity, 2))
     else:
-        # Vacation and others use Hours directly
-        return str(sql_hrs) if sql_hrs else str(entry_units)
+        # INSERT case: sql_hrs is the actual quantity to enter
+        if time_off_type_key == "Lawyer Supplement Time Off":
+            # Lawyer Supplement: sql_hrs is already in days
+            result["quantity"] = str(round(abs(hrs_value), 2)) if hrs_value else str(existing_units) if existing_units else "1"
+        else:
+            # Vacation: sql_hrs is in hours
+            result["quantity"] = str(round(abs(hrs_value), 2)) if hrs_value else str(existing_units) if existing_units else "0"
+    
+    return result
+
+
+def log_calculation_details(insert_update: str, existing_units: str, sql_hrs: float, calc_result: dict):
+    """Log the calculation details for debugging."""
+    logger.info(f"  Calculation Details:")
+    logger.info(f"    - Operation: {'UPDATE' if insert_update == 'U' else 'INSERT'}")
+    logger.info(f"    - Existing Units: {existing_units}")
+    logger.info(f"    - SQL Hours/Days: {sql_hrs}")
+    logger.info(f"    - Calculated Quantity: {calc_result['quantity']}")
+    if calc_result['needs_zero_out']:
+        logger.info(f"    - Action: Zero out first, then {'remove completely' if calc_result['is_removal'] else 're-enter with ' + calc_result['quantity']}")
+
+
+def execute_adjust_time_off(workday_id: str, wid: str, date_val: str, access_token: str, dry_run: bool = False):
+    """
+    Execute the adjust time off API to zero out an existing entry.
+    This is required before re-entering a new value for updates.
+    """
+    payload = build_adjust_time_off_payload(wid, date_val, "0")
+    url = f"https://wd3-impl-services1.workday.com/ccx/api/absenceManagement/v3/nrf3/workers/{workday_id}/adjustTimeOff"
+    
+    logger.info(f"  [ZERO OUT] Adjusting existing entry to 0")
+    log_request("POST", url, payload=payload)
+    
+    result = execute_post_request(url, payload, access_token, dry_run)
+    log_result(result["success"], dry_run, result.get("error") or result.get("response_text"))
+    
+    return result
 
 
 def process_single_row(row, report_endpoint, access_token, dry_run):
@@ -365,6 +461,7 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
     prompt_date = row.get("Timecard_post_date")
     worked_date = row.get("timecard_worked_date")
     sql_hrs = row.get("hrs")
+    insert_update = row.get("InsertUpdate", "I")  # Default to Insert if not specified
 
     if not all([workday_id, prompt_date, worked_date]):
         logger.warning(f"Skipping row - missing required fields: WorkdayId={workday_id}, prompt_date={prompt_date}, worked_date={worked_date}")
@@ -372,8 +469,9 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
 
     # Log worker processing start
     log_worker_start(workday_id, worked_date)
+    logger.info(f"  Operation: {'UPDATE' if insert_update == 'U' else 'INSERT'} | SQL Hours: {sql_hrs}")
     
-    # Fetch existing time off entries
+    # Fetch existing time off entries from RAS report
     entries = fetch_time_off_report_data(report_endpoint, access_token, workday_id, prompt_date, worked_date)
 
     if not entries and dry_run:
@@ -414,12 +512,58 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
         type_config = SUPPORTED_TIME_OFF_TYPES[type_key]
         unit_of_time = type_config["unit_of_time"]
         
-        # Calculate quantity based on type
-        qty = calculate_quantity(type_key, entry.get("units"), sql_hrs)
-        log_time_off_match(type_key, wid, qty, unit_of_time)
+        # Get existing units from entry
+        existing_units = entry.get("units") or entry.get("Total_Units") or "0"
         
-        # Build payload and URL
-        payload = build_time_off_payload(wid, worked_date, qty, type_key)
+        # Calculate quantity based on type and insert/update flag
+        calc_result = calculate_quantity(type_key, existing_units, sql_hrs, insert_update)
+        
+        # Log calculation details
+        log_calculation_details(insert_update, existing_units, sql_hrs, calc_result)
+        log_time_off_match(type_key, wid, calc_result["quantity"], unit_of_time)
+        
+        # Initialize log entry
+        log_entry = {
+            "worker_id": workday_id,
+            "request_date": str(worked_date),
+            "time_off_type": type_key,
+            "wid": wid,
+            "operation": "UPDATE" if insert_update == "U" else "INSERT",
+            "existing_units": existing_units,
+            "sql_hrs": sql_hrs,
+            "calculated_quantity": calc_result["quantity"],
+            "unit_of_time": unit_of_time,
+            "dry_run": dry_run,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # Handle UPDATE case: need to zero out first
+        if calc_result["needs_zero_out"]:
+            logger.info(f"  UPDATE detected - zeroing out existing entry first")
+            
+            # Step 1: Zero out the existing entry
+            zero_result = execute_adjust_time_off(workday_id, wid, worked_date, access_token, dry_run)
+            log_entry["zero_out_success"] = zero_result["success"]
+            
+            if not zero_result["success"]:
+                log_entry["success"] = False
+                log_entry["error"] = f"Failed to zero out: {zero_result.get('error') or zero_result.get('response_text')}"
+                logs.append(log_entry)
+                continue
+            
+            # Step 2: If this is a complete removal, we're done
+            if calc_result["is_removal"]:
+                logger.info(f"  Complete removal - entry zeroed out, no re-entry needed")
+                log_entry["success"] = True
+                log_entry["action"] = "REMOVED"
+                logs.append(log_entry)
+                continue
+            
+            # Step 3: Re-enter with new value
+            logger.info(f"  Re-entering with new value: {calc_result['quantity']}")
+        
+        # Build payload and URL for enter time off
+        payload = build_time_off_payload(wid, worked_date, calc_result["quantity"], type_key)
         url = f"https://wd3-impl-services1.workday.com/ccx/api/absenceManagement/v3/nrf3/workers/{workday_id}/requestTimeOff"
         
         # Log the POST request
@@ -431,18 +575,9 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
         # Log the result
         log_result(result["success"], dry_run, result.get("error") or result.get("response_text"))
         
-        # Build log entry
-        log_entry = {
-            "worker_id": workday_id,
-            "request_date": str(worked_date),
-            "success": result["success"],
-            "timestamp": result["timestamp"],
-            "time_off_type": type_key,
-            "wid": wid,
-            "quantity": qty,
-            "unit_of_time": unit_of_time,
-            "dry_run": dry_run
-        }
+        # Update log entry with result
+        log_entry["success"] = result["success"]
+        log_entry["action"] = "UPDATED" if insert_update == "U" else "INSERTED"
         
         if result["success"] and not dry_run:
             parsed_fields = parse_time_off_response(result.get("json_data", {}))
