@@ -603,26 +603,76 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
 
 
 # --- LOGGING UTILS ---
+def sanitize_log_entry(entry):
+    """
+    Sanitize a log entry to ensure all values are JSON-serializable.
+    Converts non-serializable types to strings.
+    """
+    sanitized = {}
+    for key, value in entry.items():
+        if value is None:
+            sanitized[key] = None
+        elif isinstance(value, (datetime, date)):
+            sanitized[key] = value.isoformat()
+        elif isinstance(value, (str, int, float, bool)):
+            sanitized[key] = value
+        elif isinstance(value, dict):
+            # Recursively sanitize nested dicts
+            sanitized[key] = sanitize_log_entry(value)
+        elif isinstance(value, (list, tuple)):
+            # Convert list items
+            sanitized[key] = [
+                sanitize_log_entry(v) if isinstance(v, dict) else str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
+                for v in value
+            ]
+        else:
+            # Convert anything else to string
+            sanitized[key] = str(value)
+    return sanitized
+
+
 def write_logs_to_table(logs_data, table_name="workday_time_off_logs"):
     """Write processing logs to a Spark table."""
     if not logs_data:
         logger.info("No logs to write")
         return
     
-    def json_serial(obj):
-        if isinstance(obj, (datetime, date)):
-            return obj.isoformat()
-        raise TypeError(f"Type {type(obj)} not serializable")
-
     try:
-        rdd = spark.sparkContext.parallelize([json.dumps(r, default=json_serial) for r in logs_data])
+        # Sanitize all log entries first
+        sanitized_logs = [sanitize_log_entry(entry) for entry in logs_data]
+        
+        # Log sample of what we're writing
+        logger.info(f"Writing {len(sanitized_logs)} log entries to {table_name}")
+        if sanitized_logs:
+            logger.info(f"Sample log entry keys: {list(sanitized_logs[0].keys())}")
+        
+        # Convert to JSON strings
+        json_strings = [json.dumps(entry) for entry in sanitized_logs]
+        
+        # Write to Spark table
+        rdd = spark.sparkContext.parallelize(json_strings)
         df_logs = spark.read.json(rdd)
         df_logs.write.mode("append").saveAsTable(table_name)
-        logger.info(f"Written {len(logs_data)} logs to {table_name}")
+        logger.info(f"Successfully written {len(sanitized_logs)} logs to {table_name}")
+        
     except NameError:
         logger.warning("Spark unavailable - logs not persisted to table")
+        # Print logs to console as fallback
+        logger.info("Logs that would have been written:")
+        for entry in logs_data[:3]:  # Show first 3 entries
+            logger.info(f"  {entry}")
+        if len(logs_data) > 3:
+            logger.info(f"  ... and {len(logs_data) - 3} more entries")
     except Exception as e:
         logger.error(f"Failed to write logs to table: {e}")
+        # Log the problematic data for debugging
+        logger.error(f"Error details: {type(e).__name__}: {e}")
+        if logs_data:
+            try:
+                sample = sanitize_log_entry(logs_data[0])
+                logger.error(f"Sample sanitized entry: {json.dumps(sample, indent=2)}")
+            except Exception as inner_e:
+                logger.error(f"Could not serialize sample entry: {inner_e}")
 
 
 # --- MAIN EXECUTOR ---
