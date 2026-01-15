@@ -108,10 +108,14 @@ def refresh_workday_access_token(client_id: str, client_secret: str, refresh_tok
 def get_worker_details_spark():
     """Fetch worker details from Spark SQL."""
     try:
+        # TODO: Add join to get WorkerWid from the appropriate table
+        # WorkerWid is the Workday Worker WID (e.g., "f503c098b21d10010654c7866af00003")
+        # It should be available in the bronze/silver layer worker table
         query = """
         SELECT
             HP.INTERNAL_NUM        AS TimeKeeper,
             HP.EMPLOYEE_CODE       AS WorkdayId,
+            WD.WID                 AS WorkerWid,  -- TODO: Join with worker table to get this
             TT.TOBILL_HRS          AS hrs,
             year(TRAN_DATE)        AS WorkedYear,
             TRAN_DATE              AS timecard_worked_date,
@@ -128,6 +132,8 @@ def get_worker_details_spark():
         JOIN silver.HBM_PERSNL HP ON HP.EMPL_UNO = TT.TK_EMPL_UNO
         JOIN silver.HBL_DEPT HD ON HD.DEPT_CODE = HP.DEPT
         JOIN silver.HBL_OFFICE HO ON HO.OFFC_CODE = HP.OFFC
+        -- TODO: Add join to get WorkerWid
+        -- LEFT JOIN silver.WORKER_TABLE WD ON WD.COLLEAGUE_ID = HP.EMPLOYEE_CODE
         WHERE MATTER_CODE IN ('8000000028','1000325429','8000000016','1000325434','1000086654')
           AND year(TRAN_DATE) >= year(current_date()) - 1
           AND HP.`POSITION` IN ('Associate', 'Counsel')
@@ -144,7 +150,15 @@ def get_worker_details_spark():
         return rows
     except NameError:
         logger.warning("Spark session not available - using mock data")
-        return [{"WorkdayId": "52107", "Timecard_post_date": "2025-03-17", "timecard_worked_date": "2025-03-14", "hrs": 8.0, "InsertUpdate": "I"}]
+        # Mock data includes WorkerWid for testing
+        return [{
+            "WorkdayId": "52107",
+            "WorkerWid": "f503c098b21d10010654c7866af00003",  # Worker WID for API URL
+            "Timecard_post_date": "2025-03-17",
+            "timecard_worked_date": "2025-03-14",
+            "hrs": 8.0,
+            "InsertUpdate": "I"
+        }]
     except Exception as e:
         logger.error(f"Spark query failed: {e}")
         return []
@@ -226,23 +240,26 @@ def build_time_off_payload(time_off_entry_wid: str, date_val: str, quantity: str
     }
 
 
-def build_adjust_time_off_payload(time_off_entry_wid: str, date_val: str, quantity: str = "0"):
+def build_correct_time_off_payload(time_off_entry_wid: str, quantity: str = "0"):
     """
-    Construct the payload for ADJUST time off request (used to zero out existing entries).
+    Construct the payload for CORRECT time off entry request (used to zero out existing entries).
     
-    Note: To update an entry, you must first adjust it to zero, then enter the new value.
+    Note: To update an entry, you must first correct it to zero, then enter the new value.
+    
+    Args:
+        time_off_entry_wid: The WID of the existing time off entry to correct
+        quantity: The quantity to set (default "0" to zero out)
     """
-    formatted_date = date_val if "T" in str(date_val) else f"{date_val}T08:00:00.000Z"
-    
     return {
         "days": [
             {
                 "dailyQuantity": str(quantity),
-                "comment": "INT0137 - Adjustment",
-                "timeOffEntry": {
+                "comment": "INT0137",
+                "correctedEntry": {
                     "id": time_off_entry_wid
                 },
-                "date": formatted_date
+                "descriptor": "Correct entry",
+                "id": time_off_entry_wid
             }
         ]
     }
@@ -441,15 +458,21 @@ def log_calculation_details(insert_update: str, existing_units: str, sql_hrs: fl
         logger.info(f"    - Action: Zero out first, then {'remove completely' if calc_result['is_removal'] else 're-enter with ' + calc_result['quantity']}")
 
 
-def execute_adjust_time_off(workday_id: str, wid: str, date_val: str, access_token: str, dry_run: bool = False):
+def execute_correct_time_off(worker_wid: str, time_off_entry_wid: str, access_token: str, dry_run: bool = False):
     """
-    Execute the adjust time off API to zero out an existing entry.
+    Execute the correct time off entry API to zero out an existing entry.
     This is required before re-entering a new value for updates.
-    """
-    payload = build_adjust_time_off_payload(wid, date_val, "0")
-    url = f"https://wd3-impl-services1.workday.com/ccx/api/absenceManagement/v3/nrf3/workers/{workday_id}/adjustTimeOff"
     
-    logger.info(f"  [ZERO OUT] Adjusting existing entry to 0")
+    Args:
+        worker_wid: The Worker WID (e.g., "f503c098b21d10010654c7866af00003")
+        time_off_entry_wid: The Time Off Entry WID to correct
+        access_token: Bearer token for authentication
+        dry_run: If True, don't make actual API call
+    """
+    payload = build_correct_time_off_payload(time_off_entry_wid, "0")
+    url = f"https://wd3-impl-services1.workday.com/ccx/api/absenceManagement/v3/nrf3/workers/{worker_wid}/correctTimeOffEntry"
+    
+    logger.info(f"  [ZERO OUT] Correcting existing entry to 0")
     log_request("POST", url, payload=payload)
     
     result = execute_post_request(url, payload, access_token, dry_run)
@@ -461,22 +484,28 @@ def execute_adjust_time_off(workday_id: str, wid: str, date_val: str, access_tok
 def process_single_row(row, report_endpoint, access_token, dry_run):
     """Process a single worker row and return log entries."""
     logs = []
-    workday_id = row.get("WorkdayId")
+    colleague_id = row.get("WorkdayId")  # Colleague ID (e.g., "52107")
+    worker_wid = row.get("WorkerWid")     # Worker WID (e.g., "f503c098b21d10010654c7866af00003")
     prompt_date = row.get("Timecard_post_date")
     worked_date = row.get("timecard_worked_date")
     sql_hrs = row.get("hrs")
     insert_update = row.get("InsertUpdate", "I")  # Default to Insert if not specified
 
-    if not all([workday_id, prompt_date, worked_date]):
-        logger.warning(f"Skipping row - missing required fields: WorkdayId={workday_id}, prompt_date={prompt_date}, worked_date={worked_date}")
+    if not all([colleague_id, prompt_date, worked_date]):
+        logger.warning(f"Skipping row - missing required fields: ColleagueId={colleague_id}, prompt_date={prompt_date}, worked_date={worked_date}")
+        return logs
+    
+    if not worker_wid:
+        logger.warning(f"Skipping row - WorkerWid is missing for ColleagueId={colleague_id}. Add WorkerWid to SQL query.")
         return logs
 
     # Log worker processing start
-    log_worker_start(workday_id, worked_date)
+    log_worker_start(colleague_id, worked_date)
+    logger.info(f"  Worker WID: {worker_wid}")
     logger.info(f"  Operation: {'UPDATE' if insert_update == 'U' else 'INSERT'} | SQL Hours: {sql_hrs}")
     
-    # Fetch existing time off entries from RAS report
-    entries = fetch_time_off_report_data(report_endpoint, access_token, workday_id, prompt_date, worked_date)
+    # Fetch existing time off entries from RAS report (uses Colleague ID)
+    entries = fetch_time_off_report_data(report_endpoint, access_token, colleague_id, prompt_date, worked_date)
 
     if not entries and dry_run:
         # Mock entries for testing both supported types
@@ -528,10 +557,11 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
         
         # Initialize log entry
         log_entry = {
-            "worker_id": workday_id,
+            "colleague_id": colleague_id,
+            "worker_wid": worker_wid,
             "request_date": str(worked_date),
             "time_off_type": type_key,
-            "wid": wid,
+            "time_off_entry_wid": wid,
             "operation": "UPDATE" if insert_update == "U" else "INSERT",
             "existing_units": existing_units,
             "sql_hrs": sql_hrs,
@@ -541,12 +571,12 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
             "timestamp": datetime.utcnow().isoformat()
         }
         
-        # Handle UPDATE case: need to zero out first
+        # Handle UPDATE case: need to zero out first using correctTimeOffEntry
         if calc_result["needs_zero_out"]:
-            logger.info(f"  UPDATE detected - zeroing out existing entry first")
+            logger.info(f"  UPDATE detected - correcting existing entry to 0 first")
             
-            # Step 1: Zero out the existing entry
-            zero_result = execute_adjust_time_off(workday_id, wid, worked_date, access_token, dry_run)
+            # Step 1: Zero out the existing entry using correctTimeOffEntry API
+            zero_result = execute_correct_time_off(worker_wid, wid, access_token, dry_run)
             log_entry["zero_out_success"] = zero_result["success"]
             
             if not zero_result["success"]:
@@ -566,9 +596,9 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
             # Step 3: Re-enter with new value
             logger.info(f"  Re-entering with new value: {calc_result['quantity']}")
         
-        # Build payload and URL for enter time off
+        # Build payload and URL for enter time off (uses Worker WID in URL)
         payload = build_time_off_payload(wid, worked_date, calc_result["quantity"], type_key)
-        url = f"https://wd3-impl-services1.workday.com/ccx/api/absenceManagement/v3/nrf3/workers/{workday_id}/requestTimeOff"
+        url = f"https://wd3-impl-services1.workday.com/ccx/api/absenceManagement/v3/nrf3/workers/{worker_wid}/requestTimeOff"
         
         # Log the POST request
         log_request("POST", url, payload=payload)
@@ -599,9 +629,9 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
         for _, _, type_key, _ in supported_entries:
             type_counts[type_key] = type_counts.get(type_key, 0) + 1
         type_summary = ", ".join(f"{k}: {v}" for k, v in type_counts.items())
-        logger.info(f"  Worker {workday_id} summary: {len(supported_entries)} entries processed ({type_summary}), {len(skipped_entries)} skipped")
+        logger.info(f"  Worker {colleague_id} summary: {len(supported_entries)} entries processed ({type_summary}), {len(skipped_entries)} skipped")
     else:
-        logger.info(f"  Worker {workday_id} summary: No supported time off entries found, {len(skipped_entries)} skipped")
+        logger.info(f"  Worker {colleague_id} summary: No supported time off entries found, {len(skipped_entries)} skipped")
     
     return logs
 
