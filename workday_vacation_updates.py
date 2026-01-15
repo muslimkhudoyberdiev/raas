@@ -45,14 +45,11 @@ def log_request(method, endpoint, params=None, payload=None):
         logger.info(f"  Payload: {json.dumps(payload, indent=4, default=str)}")
 
 
-def log_response(status_code, entry_count=None, content=None):
+def log_response(status_code, content=None):
     """Log HTTP response details in a structured format."""
-    if entry_count is not None:
-        logger.info(f"  Response: {status_code} | Entries: {entry_count}")
-    else:
-        logger.info(f"  Response: {status_code}")
-    if content and logger.level <= logging.DEBUG:
-        logger.debug(f"  Content: {json.dumps(content, indent=4, default=str)}")
+    logger.info(f"  Response Status: {status_code}")
+    if content:
+        logger.info(f"  Response Body:\n{json.dumps(content, indent=4, default=str)}")
 
 
 def log_skipped_entries(skipped_list):
@@ -173,7 +170,7 @@ def fetch_time_off_report_data(base_endpoint: str, access_token: str, colleague_
         entries = response.json().get("Report_Entry", []) if response.status_code == 200 else []
         
         # Log the response
-        log_response(response.status_code, entry_count=len(entries), content=entries)
+        log_response(response.status_code, content=entries)
         
         return entries
     except Exception as e:
