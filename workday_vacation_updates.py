@@ -4,7 +4,7 @@ import json
 import time
 import random
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configure logging with cleaner format
@@ -610,7 +610,7 @@ def write_logs_to_table(logs_data, table_name="workday_time_off_logs"):
         return
     
     def json_serial(obj):
-        if isinstance(obj, (datetime, datetime.date)):
+        if isinstance(obj, (datetime, date)):
             return obj.isoformat()
         raise TypeError(f"Type {type(obj)} not serializable")
 
