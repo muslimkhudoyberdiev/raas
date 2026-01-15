@@ -655,10 +655,10 @@ def write_logs_to_table(logs_data, table_name="workday_time_off_logs"):
         # Convert to JSON strings
         json_strings = [json.dumps(entry) for entry in sanitized_logs]
         
-        # Write to Spark table
+        # Write to Spark table with schema merge enabled
         rdd = spark.sparkContext.parallelize(json_strings)
         df_logs = spark.read.json(rdd)
-        df_logs.write.mode("append").saveAsTable(table_name)
+        df_logs.write.mode("append").option("mergeSchema", "true").saveAsTable(table_name)
         logger.info(f"Successfully written {len(sanitized_logs)} logs to {table_name}")
         
     except NameError:
