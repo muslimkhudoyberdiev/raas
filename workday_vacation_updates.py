@@ -124,12 +124,12 @@ def get_worker_details_spark():
             MATTER_CODE,
             CASE WHEN min(POST_DATE) OVER (PARTITION BY HP.INTERNAL_NUM, TRAN_DATE) = POST_DATE THEN 'I' ELSE 'U' END AS InsertUpdate,
             HP.`POSITION`          AS jobtitle
-        FROM silver.HBM_MATTER M
-        JOIN silver.TAT_TIME TT ON M.MATTER_UNO = TT.MATTER_UNO
-        JOIN silver.HBM_CLIENT HC ON HC.CLIENT_UNO = M.CLIENT_UNO
-        JOIN silver.HBM_PERSNL HP ON HP.EMPL_UNO = TT.TK_EMPL_UNO
-        JOIN silver.HBL_DEPT HD ON HD.DEPT_CODE = HP.DEPT
-        JOIN silver.HBL_OFFICE HO ON HO.OFFC_CODE = HP.OFFC
+        FROM US_IT_FINANCE_LH_L1.sc_bronze.HBM_MATTER M
+        JOIN US_IT_FINANCE_LH_L1.sc_bronze.TAT_TIME TT ON M.MATTER_UNO = TT.MATTER_UNO
+        JOIN US_IT_FINANCE_LH_L1.sc_bronze.HBM_CLIENT HC ON HC.CLIENT_UNO = M.CLIENT_UNO
+        JOIN US_IT_FINANCE_LH_L1.sc_bronze.HBM_PERSNL HP ON HP.EMPL_UNO = TT.TK_EMPL_UNO
+        JOIN US_IT_FINANCE_LH_L1.sc_bronze.HBL_DEPT HD ON HD.DEPT_CODE = HP.DEPT
+        JOIN US_IT_FINANCE_LH_L1.sc_bronze.HBL_OFFICE HO ON HO.OFFC_CODE = HP.OFFC
         -- Cross-lakehouse join to get Worker WID
         LEFT JOIN US_IT_HRIS_LH_L0_LakeHouse.workday_batch_worker_details WBW 
             ON WBW.colleagueId = HP.EMPLOYEE_CODE
