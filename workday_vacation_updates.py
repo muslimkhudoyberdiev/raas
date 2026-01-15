@@ -105,70 +105,30 @@ def refresh_workday_access_token(client_id: str, client_secret: str, refresh_tok
 
 
 # --- DATA FETCHING (SOURCE) ---
-def load_hris_worker_details():
-    """
-    Load HRIS worker details table. Try multiple methods for cross-lakehouse access.
-    
-    NOTE: In Fabric notebooks, you must add BOTH lakehouses to the notebook:
-    1. Click "Add" in the Lakehouse panel
-    2. Select the second lakehouse
-    3. Both will then be accessible via spark.sql()
-    """
-    # Method 1: Try direct table reference (works if lakehouse is added to notebook)
-    try:
-        df = spark.sql("SELECT workdayId, colleagueId FROM US_IT_HRIS_LH_L0_LakeHouse.workday_batch_worker_details")
-        logger.info(f"Loaded HRIS data via direct SQL: {df.count()} records")
-        return df
-    except Exception as e1:
-        logger.warning(f"Direct SQL failed: {e1}")
-    
-    # Method 2: Try with default schema
-    try:
-        df = spark.sql("SELECT workdayId, colleagueId FROM workday_batch_worker_details")
-        logger.info(f"Loaded HRIS data via default schema: {df.count()} records")
-        return df
-    except Exception as e2:
-        logger.warning(f"Default schema failed: {e2}")
-    
-    # Method 3: Try reading as delta table with abfss path
-    # Update this path to your actual storage path
-    try:
-        # Example: abfss://workspace@onelake.dfs.fabric.microsoft.com/US_IT_HRIS_LH_L0_LakeHouse.Lakehouse/Tables/workday_batch_worker_details
-        abfss_path = "abfss://YOUR_WORKSPACE@onelake.dfs.fabric.microsoft.com/US_IT_HRIS_LH_L0_LakeHouse.Lakehouse/Tables/workday_batch_worker_details"
-        df = spark.read.format("delta").load(abfss_path)
-        logger.info(f"Loaded HRIS data via abfss path: {df.count()} records")
-        return df
-    except Exception as e3:
-        logger.warning(f"abfss path failed: {e3}")
-    
-    # Method 4: Return None and skip the join
-    logger.error("Could not load HRIS worker details. WorkerWid will be NULL.")
-    return None
-
-
 def get_worker_details_spark():
     """Fetch worker details from Spark SQL with cross-lakehouse join."""
     try:
         logger.info("Setting up cross-lakehouse query...")
         
-        # Step 1: Load HRIS worker details and create temp view
-        hris_df = load_hris_worker_details()
-        if hris_df is not None:
-            hris_df.createOrReplaceTempView("worker_details_temp")
-            use_worker_join = True
-        else:
-            use_worker_join = False
-            logger.warning("Proceeding without WorkerWid - API calls will fail!")
+        # Step 1: Switch to HRIS lakehouse and load worker details
+        logger.info("Switching to HRIS lakehouse to load worker details...")
+        spark.sql("USE US_IT_HRIS_LH_L0_LakeHouse")
         
-        # Step 2: Build query - conditionally include worker join
-        worker_select = "WBW.workdayId AS WorkerWid," if use_worker_join else "NULL AS WorkerWid,"
-        worker_join = "LEFT JOIN worker_details_temp WBW ON WBW.colleagueId = HP.EMPLOYEE_CODE" if use_worker_join else ""
+        # Load worker details into temp view
+        hris_df = spark.sql("SELECT workdayId, colleagueId FROM workday_batch_worker_details")
+        hris_df.createOrReplaceTempView("worker_details_temp")
+        logger.info(f"Loaded HRIS worker details: {hris_df.count()} records")
         
-        query = f"""
+        # Step 2: Switch back to Finance lakehouse
+        logger.info("Switching back to Finance lakehouse...")
+        spark.sql("USE US_IT_FINANCE_LH_L1")
+        
+        # Step 3: Query Finance tables with join to HRIS temp view
+        query = """
         SELECT
             HP.INTERNAL_NUM        AS TimeKeeper,
             HP.EMPLOYEE_CODE       AS ColleagueId,
-            {worker_select}
+            WBW.workdayId          AS WorkerWid,
             TT.TOBILL_HRS          AS hrs,
             year(TRAN_DATE)        AS WorkedYear,
             TRAN_DATE              AS timecard_worked_date,
@@ -179,13 +139,13 @@ def get_worker_details_spark():
             MATTER_CODE,
             CASE WHEN min(POST_DATE) OVER (PARTITION BY HP.INTERNAL_NUM, TRAN_DATE) = POST_DATE THEN 'I' ELSE 'U' END AS InsertUpdate,
             HP.`POSITION`          AS jobtitle
-        FROM US_IT_FINANCE_LH_L1.sc_bronze.HBM_MATTER M
-        JOIN US_IT_FINANCE_LH_L1.sc_bronze.TAT_TIME TT ON M.MATTER_UNO = TT.MATTER_UNO
-        JOIN US_IT_FINANCE_LH_L1.sc_bronze.HBM_CLIENT HC ON HC.CLIENT_UNO = M.CLIENT_UNO
-        JOIN US_IT_FINANCE_LH_L1.sc_bronze.HBM_PERSNL HP ON HP.EMPL_UNO = TT.TK_EMPL_UNO
-        JOIN US_IT_FINANCE_LH_L1.sc_bronze.HBL_DEPT HD ON HD.DEPT_CODE = HP.DEPT
-        JOIN US_IT_FINANCE_LH_L1.sc_bronze.HBL_OFFICE HO ON HO.OFFC_CODE = HP.OFFC
-        {worker_join}
+        FROM sc_bronze.HBM_MATTER M
+        JOIN sc_bronze.TAT_TIME TT ON M.MATTER_UNO = TT.MATTER_UNO
+        JOIN sc_bronze.HBM_CLIENT HC ON HC.CLIENT_UNO = M.CLIENT_UNO
+        JOIN sc_bronze.HBM_PERSNL HP ON HP.EMPL_UNO = TT.TK_EMPL_UNO
+        JOIN sc_bronze.HBL_DEPT HD ON HD.DEPT_CODE = HP.DEPT
+        JOIN sc_bronze.HBL_OFFICE HO ON HO.OFFC_CODE = HP.OFFC
+        LEFT JOIN worker_details_temp WBW ON WBW.colleagueId = HP.EMPLOYEE_CODE
         WHERE MATTER_CODE IN ('8000000028','1000325429','8000000016','1000325434','1000086654')
           AND year(TRAN_DATE) >= year(current_date()) - 1
           AND HP.`POSITION` IN ('Associate', 'Counsel')
