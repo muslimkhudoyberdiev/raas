@@ -105,15 +105,70 @@ def refresh_workday_access_token(client_id: str, client_secret: str, refresh_tok
 
 
 # --- DATA FETCHING (SOURCE) ---
-def get_worker_details_spark():
-    """Fetch worker details from Spark SQL."""
+def load_hris_worker_details():
+    """
+    Load HRIS worker details table. Try multiple methods for cross-lakehouse access.
+    
+    NOTE: In Fabric notebooks, you must add BOTH lakehouses to the notebook:
+    1. Click "Add" in the Lakehouse panel
+    2. Select the second lakehouse
+    3. Both will then be accessible via spark.sql()
+    """
+    # Method 1: Try direct table reference (works if lakehouse is added to notebook)
     try:
-        # Cross-lakehouse join to get WorkerWid from HRIS lakehouse
-        query = """
+        df = spark.sql("SELECT workdayId, colleagueId FROM US_IT_HRIS_LH_L0_LakeHouse.workday_batch_worker_details")
+        logger.info(f"Loaded HRIS data via direct SQL: {df.count()} records")
+        return df
+    except Exception as e1:
+        logger.warning(f"Direct SQL failed: {e1}")
+    
+    # Method 2: Try with default schema
+    try:
+        df = spark.sql("SELECT workdayId, colleagueId FROM workday_batch_worker_details")
+        logger.info(f"Loaded HRIS data via default schema: {df.count()} records")
+        return df
+    except Exception as e2:
+        logger.warning(f"Default schema failed: {e2}")
+    
+    # Method 3: Try reading as delta table with abfss path
+    # Update this path to your actual storage path
+    try:
+        # Example: abfss://workspace@onelake.dfs.fabric.microsoft.com/US_IT_HRIS_LH_L0_LakeHouse.Lakehouse/Tables/workday_batch_worker_details
+        abfss_path = "abfss://YOUR_WORKSPACE@onelake.dfs.fabric.microsoft.com/US_IT_HRIS_LH_L0_LakeHouse.Lakehouse/Tables/workday_batch_worker_details"
+        df = spark.read.format("delta").load(abfss_path)
+        logger.info(f"Loaded HRIS data via abfss path: {df.count()} records")
+        return df
+    except Exception as e3:
+        logger.warning(f"abfss path failed: {e3}")
+    
+    # Method 4: Return None and skip the join
+    logger.error("Could not load HRIS worker details. WorkerWid will be NULL.")
+    return None
+
+
+def get_worker_details_spark():
+    """Fetch worker details from Spark SQL with cross-lakehouse join."""
+    try:
+        logger.info("Setting up cross-lakehouse query...")
+        
+        # Step 1: Load HRIS worker details and create temp view
+        hris_df = load_hris_worker_details()
+        if hris_df is not None:
+            hris_df.createOrReplaceTempView("worker_details_temp")
+            use_worker_join = True
+        else:
+            use_worker_join = False
+            logger.warning("Proceeding without WorkerWid - API calls will fail!")
+        
+        # Step 2: Build query - conditionally include worker join
+        worker_select = "WBW.workdayId AS WorkerWid," if use_worker_join else "NULL AS WorkerWid,"
+        worker_join = "LEFT JOIN worker_details_temp WBW ON WBW.colleagueId = HP.EMPLOYEE_CODE" if use_worker_join else ""
+        
+        query = f"""
         SELECT
             HP.INTERNAL_NUM        AS TimeKeeper,
             HP.EMPLOYEE_CODE       AS ColleagueId,
-            WBW.workdayId          AS WorkerWid,
+            {worker_select}
             TT.TOBILL_HRS          AS hrs,
             year(TRAN_DATE)        AS WorkedYear,
             TRAN_DATE              AS timecard_worked_date,
@@ -130,9 +185,7 @@ def get_worker_details_spark():
         JOIN US_IT_FINANCE_LH_L1.sc_bronze.HBM_PERSNL HP ON HP.EMPL_UNO = TT.TK_EMPL_UNO
         JOIN US_IT_FINANCE_LH_L1.sc_bronze.HBL_DEPT HD ON HD.DEPT_CODE = HP.DEPT
         JOIN US_IT_FINANCE_LH_L1.sc_bronze.HBL_OFFICE HO ON HO.OFFC_CODE = HP.OFFC
-        -- Cross-lakehouse join to get Worker WID
-        LEFT JOIN US_IT_HRIS_LH_L0_LakeHouse.workday_batch_worker_details WBW 
-            ON WBW.colleagueId = HP.EMPLOYEE_CODE
+        {worker_join}
         WHERE MATTER_CODE IN ('8000000028','1000325429','8000000016','1000325434','1000086654')
           AND year(TRAN_DATE) >= year(current_date()) - 1
           AND HP.`POSITION` IN ('Associate', 'Counsel')
@@ -160,6 +213,8 @@ def get_worker_details_spark():
         }]
     except Exception as e:
         logger.error(f"Spark query failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return []
 
 
