@@ -105,9 +105,17 @@ def refresh_workday_access_token(client_id: str, client_secret: str, refresh_tok
 
 
 # --- DATA FETCHING (SOURCE) ---
-def get_worker_details_spark():
-    """Fetch worker details from Spark SQL."""
+def get_worker_details_spark(test_mode=False, test_colleague_id=None, test_date=None):
+    """
+    Fetch worker details from Spark SQL.
+    
+    Args:
+        test_mode: If True, apply additional filters for testing
+        test_colleague_id: Filter by specific colleague ID (e.g., "52107")
+        test_date: Filter by specific date (e.g., "2025-03-14")
+    """
     try:
+        # Build the base query
         query = """
         SELECT
             HP.INTERNAL_NUM        AS TimeKeeper,
@@ -134,6 +142,19 @@ def get_worker_details_spark():
           AND HO.OFFC_CODE IN ('AUS1','CHI1','DAL1','DEN1','HOU1','LAX1','IPS1','NYC1','PIT1','SAT1','SFO1','STL1','WAS1')
           AND lower(HP.`POSITION`) NOT LIKE '%partner%'
         """
+        
+        # Add test filters if in test mode
+        additional_filters = []
+        if test_mode:
+            if test_colleague_id:
+                additional_filters.append(f"HP.EMPLOYEE_CODE = '{test_colleague_id}'")
+            if test_date:
+                additional_filters.append(f"TRAN_DATE = '{test_date}'")
+        
+        if additional_filters:
+            query += " AND " + " AND ".join(additional_filters)
+            logger.info(f"TEST MODE: Filtering by {', '.join(additional_filters)}")
+        
         logger.info("Executing Spark SQL query for worker details...")
         df = spark.sql(query)
         rows = [row.asDict() for row in df.collect()]
@@ -141,7 +162,7 @@ def get_worker_details_spark():
         return rows
     except NameError:
         logger.warning("Spark session not available - using mock data")
-        return [{"WorkdayId": "50454", "Timecard_post_date": "2026-01-01", "timecard_worked_date": "2026-01-06", "hrs": 8.0}]
+        return [{"WorkdayId": "52107", "Timecard_post_date": "2025-03-17", "timecard_worked_date": "2025-03-14", "hrs": 8.0, "InsertUpdate": "I"}]
     except Exception as e:
         logger.error(f"Spark query failed: {e}")
         return []
@@ -682,19 +703,39 @@ def write_logs_to_table(logs_data, table_name="workday_time_off_logs"):
 
 
 # --- MAIN EXECUTOR ---
-def ingest_time_off_process(client_id, client_secret, refresh_token, token_url, report_url, max_workers=100, dry_run=False):
-    """Main entry point for the time off ingestion process."""
+def ingest_time_off_process(client_id, client_secret, refresh_token, token_url, report_url, 
+                            max_workers=100, dry_run=False, 
+                            test_mode=False, test_colleague_id=None, test_date=None):
+    """
+    Main entry point for the time off ingestion process.
+    
+    Args:
+        client_id: Workday OAuth client ID
+        client_secret: Workday OAuth client secret
+        refresh_token: Workday OAuth refresh token
+        token_url: Workday token endpoint URL
+        report_url: Workday RAS report URL
+        max_workers: Maximum parallel workers (default 100)
+        dry_run: If True, don't make actual API calls
+        test_mode: If True, apply test filters to limit records
+        test_colleague_id: Filter by specific colleague ID (e.g., "52107")
+        test_date: Filter by specific date (e.g., "2025-03-14")
+    """
     log_separator("*")
     logger.info(f"STARTING TIME OFF INGESTION PROCESS")
     logger.info(f"  Mode: {'DRY RUN' if dry_run else 'LIVE'}")
     logger.info(f"  Max Workers: {max_workers}")
+    if test_mode:
+        logger.info(f"  TEST MODE ENABLED:")
+        logger.info(f"    - Colleague ID: {test_colleague_id or 'ALL'}")
+        logger.info(f"    - Date: {test_date or 'ALL'}")
     log_separator("*")
     
     # Get access token
     token = refresh_workday_access_token(client_id, client_secret, refresh_token, token_url)
     
-    # Fetch worker data
-    rows = get_worker_details_spark()
+    # Fetch worker data (with optional test filters)
+    rows = get_worker_details_spark(test_mode=test_mode, test_colleague_id=test_colleague_id, test_date=test_date)
     logger.info(f"Processing {len(rows)} worker records...")
     
     all_logs = []
@@ -755,12 +796,17 @@ if __name__ == "__main__":
     TOKEN_URL = "https://wd3-impl-services1.workday.com/ccx/oauth2/nrf3/token"
     REPORT_URL = "https://wd3-impl-services1.workday.com/ccx/service/customreport2/nrf3/INT0137_USA_HCM_Datahub_Absence_ISU/CRI_INT0137_USA_Datahub_Timeoffs"
     
+    # Run in TEST MODE with single record
     ingest_time_off_process(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
         refresh_token=REFRESH_TOKEN,
         token_url=TOKEN_URL,
         report_url=REPORT_URL,
-        max_workers=10,
-        dry_run=True
+        max_workers=1,
+        dry_run=True,
+        # TEST MODE - filter to single record
+        test_mode=True,
+        test_colleague_id="52107",
+        test_date="2025-03-14"
     )
