@@ -108,14 +108,12 @@ def refresh_workday_access_token(client_id: str, client_secret: str, refresh_tok
 def get_worker_details_spark():
     """Fetch worker details from Spark SQL."""
     try:
-        # TODO: Add join to get WorkerWid from the appropriate table
-        # WorkerWid is the Workday Worker WID (e.g., "f503c098b21d10010654c7866af00003")
-        # It should be available in the bronze/silver layer worker table
+        # Cross-lakehouse join to get WorkerWid from HRIS lakehouse
         query = """
         SELECT
             HP.INTERNAL_NUM        AS TimeKeeper,
-            HP.EMPLOYEE_CODE       AS WorkdayId,
-            WD.WID                 AS WorkerWid,  -- TODO: Join with worker table to get this
+            HP.EMPLOYEE_CODE       AS ColleagueId,
+            WBW.workdayId          AS WorkerWid,
             TT.TOBILL_HRS          AS hrs,
             year(TRAN_DATE)        AS WorkedYear,
             TRAN_DATE              AS timecard_worked_date,
@@ -132,8 +130,9 @@ def get_worker_details_spark():
         JOIN silver.HBM_PERSNL HP ON HP.EMPL_UNO = TT.TK_EMPL_UNO
         JOIN silver.HBL_DEPT HD ON HD.DEPT_CODE = HP.DEPT
         JOIN silver.HBL_OFFICE HO ON HO.OFFC_CODE = HP.OFFC
-        -- TODO: Add join to get WorkerWid
-        -- LEFT JOIN silver.WORKER_TABLE WD ON WD.COLLEAGUE_ID = HP.EMPLOYEE_CODE
+        -- Cross-lakehouse join to get Worker WID
+        LEFT JOIN US_IT_HRIS_LH_L0_LakeHouse.workday_batch_worker_details WBW 
+            ON WBW.colleagueId = HP.EMPLOYEE_CODE
         WHERE MATTER_CODE IN ('8000000028','1000325429','8000000016','1000325434','1000086654')
           AND year(TRAN_DATE) >= year(current_date()) - 1
           AND HP.`POSITION` IN ('Associate', 'Counsel')
@@ -152,7 +151,7 @@ def get_worker_details_spark():
         logger.warning("Spark session not available - using mock data")
         # Mock data includes WorkerWid for testing
         return [{
-            "WorkdayId": "52107",
+            "ColleagueId": "52107",
             "WorkerWid": "f503c098b21d10010654c7866af00003",  # Worker WID for API URL
             "Timecard_post_date": "2025-03-17",
             "timecard_worked_date": "2025-03-14",
@@ -484,7 +483,7 @@ def execute_correct_time_off(worker_wid: str, time_off_entry_wid: str, access_to
 def process_single_row(row, report_endpoint, access_token, dry_run):
     """Process a single worker row and return log entries."""
     logs = []
-    colleague_id = row.get("WorkdayId")  # Colleague ID (e.g., "52107")
+    colleague_id = row.get("ColleagueId")  # Colleague ID (e.g., "52107")
     worker_wid = row.get("WorkerWid")     # Worker WID (e.g., "f503c098b21d10010654c7866af00003")
     prompt_date = row.get("Timecard_post_date")
     worked_date = row.get("timecard_worked_date")
