@@ -56,16 +56,17 @@ def log_skipped_entries(skipped_list):
     """Log all skipped entries in a consolidated format."""
     if not skipped_list:
         return
-    logger.info(f"  Skipped {len(skipped_list)} non-vacation entries:")
+    logger.info(f"  Skipped {len(skipped_list)} unsupported time off entries:")
     for entry in skipped_list:
         logger.info(f"    - Type: '{entry['type']}' | WID: {entry['wid']}")
 
 
-def log_vacation_match(wid, quantity):
-    """Log when a vacation entry is found and will be processed."""
-    logger.info(f"  VACATION MATCH FOUND:")
+def log_time_off_match(time_off_type, wid, quantity, unit_of_time="Hours"):
+    """Log when a time off entry is found and will be processed."""
+    logger.info(f"  TIME OFF MATCH FOUND:")
+    logger.info(f"    - Type: {time_off_type}")
     logger.info(f"    - WID: {wid}")
-    logger.info(f"    - Quantity: {quantity}")
+    logger.info(f"    - Quantity: {quantity} {unit_of_time}")
 
 
 def log_result(success, dry_run=False, error=None):
@@ -178,17 +179,41 @@ def fetch_time_off_report_data(base_endpoint: str, access_token: str, colleague_
         return []
 
 
+# --- SUPPORTED TIME OFF TYPES ---
+SUPPORTED_TIME_OFF_TYPES = {
+    "Vacation": {
+        "descriptor": "Vacation Time Off",
+        "unit_of_time": "Hours"
+    },
+    "Lawyer Supplement Time Off": {
+        "descriptor": "Lawyer Supplement Time Off",
+        "unit_of_time": "Days"
+    }
+}
+
+
+def get_supported_type_key(type_desc: str) -> str:
+    """Check if time off type is supported and return the key."""
+    for key in SUPPORTED_TIME_OFF_TYPES:
+        if key in type_desc:
+            return key
+    return None
+
+
 # --- PAYLOAD BUILDERS ---
-def build_vacation_payload(time_off_entry_wid: str, date_val: str, quantity: str):
-    """Construct the payload for vacation time off request."""
+def build_time_off_payload(time_off_entry_wid: str, date_val: str, quantity: str, time_off_type_key: str):
+    """Construct the payload for time off request based on type."""
     formatted_date = date_val if "T" in str(date_val) else f"{date_val}T08:00:00.000Z"
+    
+    type_config = SUPPORTED_TIME_OFF_TYPES.get(time_off_type_key, SUPPORTED_TIME_OFF_TYPES["Vacation"])
+    
     return {
         "days": [
             {
                 "dailyQuantity": str(quantity),
                 "comment": "INT0137",
                 "timeOffType": {
-                    "descriptor": "Vacation Time Off",
+                    "descriptor": type_config["descriptor"],
                     "id": time_off_entry_wid 
                 },
                 "date": formatted_date
@@ -305,9 +330,32 @@ def flatten_time_off_entries(parent_entry):
 
 
 # --- BUSINESS LOGIC ---
-def calculate_hours_logic(units, sql_hrs):
-    """Calculate the hours to submit."""
-    return str(sql_hrs)
+def calculate_quantity(time_off_type_key: str, entry_units: str, sql_hrs: float) -> str:
+    """
+    Calculate the quantity to submit based on time off type.
+    
+    Logic:
+    - Vacation: Use sql_hrs directly (hours from SQL query)
+    - Lawyer Supplement Time Off: Convert sql_hrs to days (8 hours = 1 day)
+    
+    Args:
+        time_off_type_key: The type of time off (e.g., "Vacation", "Lawyer Supplement Time Off")
+        entry_units: The units value from the API response entry
+        sql_hrs: Hours from the SQL query
+        
+    Returns:
+        Calculated quantity as string
+    """
+    if time_off_type_key == "Lawyer Supplement Time Off":
+        # Lawyer Supplement uses Days - convert hours to days (8 hours = 1 day)
+        if sql_hrs:
+            days = float(sql_hrs) / 8.0
+            return str(round(days, 2))
+        # Fallback to entry units if sql_hrs not available
+        return str(entry_units) if entry_units else "1"
+    else:
+        # Vacation and others use Hours directly
+        return str(sql_hrs) if sql_hrs else str(entry_units)
 
 
 def process_single_row(row, report_endpoint, access_token, dry_run):
@@ -329,11 +377,15 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
     entries = fetch_time_off_report_data(report_endpoint, access_token, workday_id, prompt_date, worked_date)
 
     if not entries and dry_run:
-        entries = [{"timeOffType": {"descriptor": "Vacation"}, "timeOffEntryWid": "mock_wid", "units": "8"}]
+        # Mock entries for testing both supported types
+        entries = [
+            {"timeOffType": {"descriptor": "Vacation"}, "timeOffEntryWid": "mock_vacation_wid", "units": "8"},
+            {"timeOffType": {"descriptor": "Lawyer Supplement Time Off"}, "timeOffEntryWid": "mock_lawyer_wid", "units": "1", "unitOfTime": "Days"}
+        ]
 
-    # Process entries and collect skipped items
+    # Process entries and collect supported/skipped items
     skipped_entries = []
-    vacation_entries = []
+    supported_entries = []  # List of (entry, wid, type_key, type_desc)
     
     for parent_entry in entries:
         items = flatten_time_off_entries(parent_entry)
@@ -342,25 +394,32 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
             type_desc = extract_time_off_type(entry)
             wid = extract_wid(entry)
             
-            if "Vacation" in type_desc:
-                vacation_entries.append((entry, wid))
+            # Check if this is a supported time off type
+            type_key = get_supported_type_key(type_desc)
+            if type_key:
+                supported_entries.append((entry, wid, type_key, type_desc))
             elif type_desc:
                 skipped_entries.append({"type": type_desc, "wid": wid or "N/A"})
     
     # Log all skipped entries together
     log_skipped_entries(skipped_entries)
     
-    # Process vacation entries
-    for entry, wid in vacation_entries:
+    # Process supported time off entries
+    for entry, wid, type_key, type_desc in supported_entries:
         if not wid:
-            logger.warning("  Vacation entry found but WID is missing - skipping")
+            logger.warning(f"  {type_key} entry found but WID is missing - skipping")
             continue
-            
-        qty = calculate_hours_logic(entry.get("units"), sql_hrs)
-        log_vacation_match(wid, qty)
+        
+        # Get type configuration
+        type_config = SUPPORTED_TIME_OFF_TYPES[type_key]
+        unit_of_time = type_config["unit_of_time"]
+        
+        # Calculate quantity based on type
+        qty = calculate_quantity(type_key, entry.get("units"), sql_hrs)
+        log_time_off_match(type_key, wid, qty, unit_of_time)
         
         # Build payload and URL
-        payload = build_vacation_payload(wid, worked_date, qty)
+        payload = build_time_off_payload(wid, worked_date, qty, type_key)
         url = f"https://wd3-impl-services1.workday.com/ccx/api/absenceManagement/v3/nrf3/workers/{workday_id}/requestTimeOff"
         
         # Log the POST request
@@ -378,9 +437,10 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
             "request_date": str(worked_date),
             "success": result["success"],
             "timestamp": result["timestamp"],
-            "time_off_type": "Vacation",
+            "time_off_type": type_key,
             "wid": wid,
             "quantity": qty,
+            "unit_of_time": unit_of_time,
             "dry_run": dry_run
         }
         
@@ -395,10 +455,14 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
         logs.append(log_entry)
     
     # Summary for this worker
-    if vacation_entries:
-        logger.info(f"  Worker {workday_id} summary: {len(vacation_entries)} vacation entries processed, {len(skipped_entries)} skipped")
+    if supported_entries:
+        type_counts = {}
+        for _, _, type_key, _ in supported_entries:
+            type_counts[type_key] = type_counts.get(type_key, 0) + 1
+        type_summary = ", ".join(f"{k}: {v}" for k, v in type_counts.items())
+        logger.info(f"  Worker {workday_id} summary: {len(supported_entries)} entries processed ({type_summary}), {len(skipped_entries)} skipped")
     else:
-        logger.info(f"  Worker {workday_id} summary: No vacation entries found, {len(skipped_entries)} skipped")
+        logger.info(f"  Worker {workday_id} summary: No supported time off entries found, {len(skipped_entries)} skipped")
     
     return logs
 
@@ -475,9 +539,20 @@ def ingest_time_off_process(client_id, client_secret, refresh_token, token_url, 
     log_separator("*")
     logger.info("PROCESS COMPLETE")
     logger.info(f"  Total Records Processed: {len(rows)}")
-    logger.info(f"  Vacation Requests Made: {len(all_logs)}")
+    logger.info(f"  Time Off Requests Made: {len(all_logs)}")
     logger.info(f"  Successful: {success_count}")
     logger.info(f"  Failed: {error_count}")
+    
+    # Breakdown by type
+    if all_logs:
+        type_breakdown = {}
+        for log in all_logs:
+            t = log.get("time_off_type", "Unknown")
+            type_breakdown[t] = type_breakdown.get(t, 0) + 1
+        logger.info(f"  Breakdown by Type:")
+        for t, count in type_breakdown.items():
+            logger.info(f"    - {t}: {count}")
+    
     log_separator("*")
 
 
