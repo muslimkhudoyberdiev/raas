@@ -5,6 +5,7 @@ import time
 import random
 import logging
 from datetime import datetime, timedelta, date
+from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configure logging with cleaner format
@@ -603,31 +604,36 @@ def process_single_row(row, report_endpoint, access_token, dry_run):
 
 
 # --- LOGGING UTILS ---
+def sanitize_value(value):
+    """Sanitize a single value to ensure it's JSON-serializable."""
+    if value is None:
+        return None
+    elif isinstance(value, (datetime, date)):
+        return value.isoformat()
+    elif isinstance(value, Decimal):
+        return float(value)
+    elif isinstance(value, (str, int, float, bool)):
+        return value
+    elif isinstance(value, dict):
+        return sanitize_log_entry(value)
+    elif isinstance(value, (list, tuple)):
+        return [sanitize_value(v) for v in value]
+    else:
+        # Convert anything else to string
+        return str(value)
+
+
 def sanitize_log_entry(entry):
     """
     Sanitize a log entry to ensure all values are JSON-serializable.
-    Converts non-serializable types to strings.
+    Converts non-serializable types to appropriate JSON types.
     """
+    if not isinstance(entry, dict):
+        return sanitize_value(entry)
+    
     sanitized = {}
     for key, value in entry.items():
-        if value is None:
-            sanitized[key] = None
-        elif isinstance(value, (datetime, date)):
-            sanitized[key] = value.isoformat()
-        elif isinstance(value, (str, int, float, bool)):
-            sanitized[key] = value
-        elif isinstance(value, dict):
-            # Recursively sanitize nested dicts
-            sanitized[key] = sanitize_log_entry(value)
-        elif isinstance(value, (list, tuple)):
-            # Convert list items
-            sanitized[key] = [
-                sanitize_log_entry(v) if isinstance(v, dict) else str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
-                for v in value
-            ]
-        else:
-            # Convert anything else to string
-            sanitized[key] = str(value)
+        sanitized[key] = sanitize_value(value)
     return sanitized
 
 
