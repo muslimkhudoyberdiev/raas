@@ -110,20 +110,21 @@ def get_worker_details_spark():
     try:
         logger.info("Setting up cross-lakehouse query...")
         
-        # Step 1: Switch to HRIS lakehouse and load worker details
-        logger.info("Switching to HRIS lakehouse to load worker details...")
-        spark.sql("USE US_IT_HRIS_LH_L0_LakeHouse")
+        # Step 1: Read HRIS worker details using spark.read.table()
+        logger.info("Loading HRIS worker details...")
+        try:
+            # Try reading directly using the lakehouse name as catalog
+            hris_df = spark.read.table("US_IT_HRIS_LH_L0_LakeHouse.workday_batch_worker_details")
+        except:
+            # Fallback: try with default schema
+            logger.info("Trying alternative table path...")
+            hris_df = spark.read.table("workday_batch_worker_details")
         
-        # Load worker details into temp view
-        hris_df = spark.sql("SELECT workdayId, colleagueId FROM workday_batch_worker_details")
         hris_df.createOrReplaceTempView("worker_details_temp")
         logger.info(f"Loaded HRIS worker details: {hris_df.count()} records")
         
-        # Step 2: Switch back to Finance lakehouse
-        logger.info("Switching back to Finance lakehouse...")
-        spark.sql("USE US_IT_FINANCE_LH_L1")
-        
-        # Step 3: Query Finance tables with join to HRIS temp view
+        # Step 2: Query Finance tables with join to HRIS temp view
+        # (Finance lakehouse should be set as default in the notebook)
         query = """
         SELECT
             HP.INTERNAL_NUM        AS TimeKeeper,
